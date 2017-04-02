@@ -273,7 +273,7 @@ const unsigned nn=center_lista.size();
          coordination2 += switchingFunction2.calculateSqr(distance.modulo2(),dfunc);
          Vector dd(dfunc*distance);
          Tensor vv(dd,distance);
-         virial1 -= vv;
+         virial2 -= vv;
          deriv2[i]-=dd;
          deriv2[neighbors[j]]+=dd;
        } else if ( neighbors[j]>=(center_lista.size()+around_species1_lista.size()+around_species2_lista.size()) ){
@@ -281,7 +281,7 @@ const unsigned nn=center_lista.size();
          coordination3 += switchingFunction3.calculateSqr(distance.modulo2(),dfunc);
          Vector dd(dfunc*distance);
          Tensor vv(dd,distance);
-         virial1 -= vv;
+         virial3 -= vv;
          deriv3[i]-=dd;
          deriv3[neighbors[j]]+=dd;
        }
@@ -303,7 +303,7 @@ const unsigned nn=center_lista.size();
    }
    for(unsigned int j=0;j<3;j+=1) {   
      for(unsigned int k=0;k<3;k+=1) {   
-       virial[j][k] += virial1[j][k]*dfunc1*CVvalue2*CVvalue3+CVvalue1*virial2[j][k]*dfunc2*CVvalue3+CVvalue1*CVvalue2*virial3[j][k]*dfunc3;
+       virial[j][k] += virial1[j][k]*dfunc1*CVvalue2*CVvalue3 + CVvalue1*virial2[j][k]*dfunc2*CVvalue3 + CVvalue1*CVvalue2*virial3[j][k]*dfunc3;
      }
    }
  }
