@@ -32,32 +32,36 @@ using namespace std;
 namespace PLMD{
 namespace colvar{
 
-//+PLUMEDOC COLVAR PAIRENTROPY
+//+PLUMEDOC COLVAR PAIRENTROPY_MULTICOMP
 /*
-Calculate the global pair entropy using the expression:
+Calculate the per-atom global pair entropy of a two-component system using the expression:
 \f[
-s=-2\pi\rho k_B \int\limits_0^{r_{\mathrm{max}}} \left [ g(r) \ln g(r) - g(r) + 1 \right ] r^2 dr .
+s=-2\pi (\rho_A^2/\rho) k_B \int\limits_0^{r_{\mathrm{max}}} \left [ g_{AA}(r) \ln g_{AA}(r) - g_{AA}(r) + 1 \right ] r^2 dr 
+- 4\pi (\rho_A\rho_B/\rho) k_B \int\limits_0^{r_{\mathrm{max}}} \left [ g_{AB}(r) \ln g_{AB}(r) - g_{AB}(r) + 1 \right ] r^2 dr 
+- 2\pi (\rho_B^2\rho) k_B \int\limits_0^{r_{\mathrm{max}}} \left [ g_{BB}(r) \ln g_{BB}(r) - g_{BB}(r) + 1 \right ] r^2 dr 
 \f]
-where \f$ g(r) $\f is the pair distribution function and \f$ r_{\mathrm{max}} $\f is a cutoff in the integration (MAXR).
+where \f$ g_{\alpha\beta}(r) $\f are the pair distribution functions of the pairs and \f$ r_{\mathrm{max}} $\f is a cutoff in the integration (MAXR).
+\f$ \rho_A $\f is the density of A atoms, \f$ \rho_B $\f is the density of B atoms and \f$ \rho $\f is the total density.
 For the integration the interval from 0 to  \f$ r_{\mathrm{max}} $\f is partitioned in NHIST equal intervals. 
-To make the calculation of \f$ g(r) $\f differentiable, the following function is used:
+To make the calculation of \f$ g_{\alpha\beta}(r) $\f differentiable, the following function is used:
 \f[
-g(r) = \frac{1}{4 \pi \rho r^2} \sum\limits_{j} \frac{1}{\sqrt{2 \pi \sigma^2}} e^{-(r-r_{ij})^2/(2\sigma^2)} ,
+g_{\alpha\beta}(r) = \frac{N_A+N_B}{4 \pi \rho N_{\alpha} N_{\beta} r^2} \sum\limits_{i \in \alpha} \sum\limits_{i \in \beta} \frac{1}{\sqrt{2 \pi \sigma^2}} e^{-(r-r_{ij})^2/(2\sigma^2)} ,
 \f]
 where \f$ \rho $\f is the density and \f$ sigma $\f is a broadening parameter (SIGMA).  
 \par Example)
-The following input tells plumed to calculate the pair entropy of atoms 1-250 with themselves.
+The following input tells plumed to calculate the pair entropy of a system of 250 atoms of type A and 250 atoms of type B.
 \verbatim
-PAIRENTROPY ...
- LABEL=s2
+PAIRENTROPY_MULTICOMP ...
+ LABEL=S2
  GROUPA=1-250
- MAXR=0.65
- SIGMA=0.025
+ GROUPB=251-500
+ MAXR=0.6
+ SIGMA=0.01
  NHIST=100
  NLIST
- NL_CUTOFF=0.75
+ NL_CUTOFF=0.65
  NL_STRIDE=10
-... PAIRENTROPY
+... PAIRENTROPY_MULTICOMP
 \endverbatim
 */
 //+ENDPLUMEDOC
@@ -66,6 +70,8 @@ class PairEntropyMulticomp : public Colvar {
   bool pbc;
   bool serial;
   bool do_pairs;
+  bool doOutputGofr;
+  bool doOutputIntegrand;
   NeighborList *nl;
   bool invalidateList;
   bool firsttime;
@@ -80,6 +86,8 @@ class PairEntropyMulticomp : public Colvar {
   double integrate(vector<double> integrand, double delta)const;
   Vector integrate(vector<Vector> integrand, double delta)const;
   Tensor integrate(vector<Tensor> integrand, double delta)const;
+  void outputGofr(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB);
+  void outputIntegrand(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB);
   // Kernel to calculate g(r)
   double kernel(double distance, double&der)const;
 public:
@@ -98,6 +106,8 @@ void PairEntropyMulticomp::registerKeywords( Keywords& keys ){
   keys.addFlag("SERIAL",false,"Perform the calculation in serial - for debug purpose");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("INDIVIDUAL_PAIRS",false,"Obtain pair entropy of AA, AB, and BB pairs");
+  keys.addFlag("OUTPUT_GOFR",false,"Output g(r) of AA, AB, and BB pairs");
+  keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand of AA, AB, and BB pairs");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("atoms","GROUPA","First list of atoms");
@@ -123,6 +133,8 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
   parseFlag("INDIVIDUAL_PAIRS",do_pairs);
+  parseFlag("OUTPUT_GOFR",doOutputGofr);
+  parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
   if (do_pairs) log.printf("Calculating individual components for each pair AA, AB, and BB. \n");
 
   vector<AtomNumber> ga_lista,gb_lista,full_lista;
@@ -365,20 +377,8 @@ void PairEntropyMulticomp::calculate()
       gofrPrimeBB[j][k] /= normConstantBB;
     }
   }
-  /*
-  for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    log.printf(" gofrAA %f %f \n",x, gofrAA[j]);
-  }
-  for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    log.printf(" gofrAB %f %f \n",x, gofrAB[j]);
-  }
-  for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    log.printf(" gofrBB %f %f \n",x, gofrBB[j]);
-  }
-  */
+  // Output of gofrs
+  if (doOutputGofr) outputGofr(gofrAA,gofrAB,gofrBB);
   // Construct integrands
   vector<double> integrandAA(nhist);
   vector<double> integrandAB(nhist);
@@ -404,10 +404,9 @@ void PairEntropyMulticomp::calculate()
       integrandBB[j] = (gofrBB[j]*logGofrBB[j]-gofrBB[j]+1)*x*x;
     }
   }
-  // Integrate to obtain pair entropy;
-  //log.printf(" things %f %f \n",(densityA*densityA/density),integrate(integrandAA,deltar));
-  //log.printf(" things %f %f \n",(densityA*densityB/density),integrate(integrandAB,deltar));
-  //log.printf(" things %f %f \n",(densityB*densityB/density),integrate(integrandBB,deltar));
+  // Output of integrands
+  if (doOutputIntegrand) outputIntegrand(integrandAA,integrandAB,integrandBB);
+  // Integrate to obtain pair entropy
   double prefactorAA = -2*pi*(densityA*densityA/density);
   double prefactorAB = -4*pi*(densityA*densityB/density);
   double prefactorBB = -2*pi*(densityB*densityB/density);
@@ -546,6 +545,26 @@ Tensor PairEntropyMulticomp::integrate(vector<Tensor> integrand, double delta)co
   result += 0.5*integrand[integrand.size()-1];
   result *= delta;
   return result;
+}
+
+void PairEntropyMulticomp::outputGofr(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
+  PLMD::OFile gofrOfile;
+  gofrOfile.open("gofr.txt");
+  for(unsigned i=1;i<gofrAA.size();++i){
+     double r=deltar*(i+0.5);
+     gofrOfile.printField("r",r).printField("gofrAA",gofrAA[i]).printField("gofrAB",gofrAB[i]).printField("gofrBB",gofrBB[i]).printField();
+  }
+  gofrOfile.close();
+}
+
+void PairEntropyMulticomp::outputIntegrand(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
+  PLMD::OFile gofrOfile;
+  gofrOfile.open("integrand.txt");
+  for(unsigned i=1;i<gofrAA.size();++i){
+     double r=deltar*(i+0.5);
+     gofrOfile.printField("r",r).printField("integrandAA",gofrAA[i]).printField("integrandAB",gofrAB[i]).printField("integrandBB",gofrBB[i]).printField();
+  }
+  gofrOfile.close();
 }
 
 }
