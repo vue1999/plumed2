@@ -62,7 +62,7 @@ PAIRENTROPY ...
 */
 //+ENDPLUMEDOC
 
-class PairEntropy : public Colvar {
+class ThreeBodyEntropy : public Colvar {
   bool pbc;
   bool serial;
   NeighborList *nl;
@@ -74,7 +74,7 @@ class PairEntropy : public Colvar {
   unsigned nhist;
   double rcut2;
   double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
-  double deltar;
+  double deltaAngle;
   unsigned deltaBin;
   // Integration routines
   double integrate(vector<double> integrand, double delta)const;
@@ -86,33 +86,33 @@ class PairEntropy : public Colvar {
   void outputGofr(vector<double> gofr);
   void outputIntegrand(vector<double> integrand);
 public:
-  explicit PairEntropy(const ActionOptions&);
-  ~PairEntropy();
+  explicit ThreeBodyEntropy(const ActionOptions&);
+  ~ThreeBodyEntropy();
 // active methods:
   virtual void calculate();
   virtual void prepare();
   static void registerKeywords( Keywords& keys );
 };
 
-PLUMED_REGISTER_ACTION(PairEntropy,"PAIRENTROPY")
+PLUMED_REGISTER_ACTION(ThreeBodyEntropy,"THREE_BODY_ENTROPY")
 
-void PairEntropy::registerKeywords( Keywords& keys ){
+void ThreeBodyEntropy::registerKeywords( Keywords& keys ){
   Colvar::registerKeywords(keys);
   keys.addFlag("SERIAL",false,"Perform the calculation in serial - for debug purpose");
   keys.addFlag("PAIR",false,"Pair only 1st element of the 1st group with 1st element in the second, etc");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
-  keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
+  //keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
-  keys.add("atoms","GROUPA","First list of atoms");
-  keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
+  keys.add("atoms","GROUP","List of atoms");
+  //keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
 }
 
-PairEntropy::PairEntropy(const ActionOptions&ao):
+ThreeBodyEntropy::ThreeBodyEntropy(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 pbc(true),
 serial(false),
@@ -122,11 +122,11 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
   parseFlag("OUTPUT_GOFR",doOutputGofr);
-  parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
+  //parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
 
   vector<AtomNumber> ga_lista,gb_lista;
-  parseAtomList("GROUPA",ga_lista);
-  parseAtomList("GROUPB",gb_lista);
+  parseAtomList("GROUP",ga_lista);
+  //parseAtomList("GROUPB",gb_lista);
 
   bool nopbc=!pbc;
   parseFlag("NOPBC",nopbc);
@@ -149,26 +149,18 @@ firsttime(true)
   }
 
   addValueWithDerivatives(); setNotPeriodic();
-  if(gb_lista.size()>0){
-    if(doneigh)  nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc(),nl_cut,nl_st);
-    else         nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc());
-  } else {
+  if(ga_lista.size()>0){
     if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
     else         nl= new NeighborList(ga_lista,pbc,getPbc());
   }
 
   requestAtoms(nl->getFullAtomList());
 
-  log.printf("  between two groups of %u and %u atoms\n",static_cast<unsigned>(ga_lista.size()),static_cast<unsigned>(gb_lista.size()));
-  log.printf("  first group:\n");
+  log.printf("  between a group of %u atoms\n",static_cast<unsigned>(ga_lista.size()));
+  log.printf("  group:\n");
   for(unsigned int i=0;i<ga_lista.size();++i){
    if ( (i+1) % 25 == 0 ) log.printf("  \n");
    log.printf("  %d", ga_lista[i].serial());
-  }
-  log.printf("  \n  second group:\n");
-  for(unsigned int i=0;i<gb_lista.size();++i){
-   if ( (i+1) % 25 == 0 ) log.printf("  \n");
-   log.printf("  %d", gb_lista[i].serial());
   }
   log.printf("  \n");
   if(pbc) log.printf("  using periodic boundary conditions\n");
@@ -179,15 +171,14 @@ firsttime(true)
    log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
   }
 
-
   parse("MAXR",maxr);
   log.printf("Integration in the interval from 0. to %f nm. \n", maxr );
   parse("NHIST",nhist);
   log.printf("The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
   parse("SIGMA",sigma);
   log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f nm. \n", sigma);
-  double rcut = maxr + 3*sigma;
-  rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
+  double rcut = maxr; // + 3*sigma;
+  rcut2 = maxr*maxr; //(maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
   }
@@ -199,15 +190,15 @@ firsttime(true)
   invSqrt2piSigma = 1./sqrt2piSigma;
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
-  deltar=maxr/nhist;
-  deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
+  deltaAngle=2./nhist;
+  deltaBin = std::floor(3*sigma/deltaAngle); // 3*sigma is hard coded
 }
 
-PairEntropy::~PairEntropy(){
+ThreeBodyEntropy::~ThreeBodyEntropy(){
   delete nl;
 }
 
-void PairEntropy::prepare(){
+void ThreeBodyEntropy::prepare(){
   if(nl->getStride()>0){
     if(firsttime || (getStep()%nl->getStride()==0)){
       requestAtoms(nl->getFullAtomList());
@@ -223,17 +214,15 @@ void PairEntropy::prepare(){
 }
 
 // calculator
-void PairEntropy::calculate()
+void ThreeBodyEntropy::calculate()
 {
   // Define output quantities
-  double pairEntropy;
+  double threeBodyEntropy;
   vector<Vector> deriv(getNumberOfAtoms());
+  vector<double> angleHistogram(nhist);
+  vector<double> angleHistogram2(nhist);
   Tensor virial;
-  // Define intermediate quantities
-  vector<double> gofr(nhist);
-  vector<double> logGofr(nhist);
-  Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
-  vector<Tensor> gofrVirial(nhist);
+  int numberOfTriplets = 0;
   // Setup neighbor list and parallelization
   if(nl->getStride()>0 && invalidateList){
     nl->update(getPositions());
@@ -247,14 +236,105 @@ void PairEntropy::calculate()
     stride=comm.Get_size();
     rank=comm.Get_rank();
   }
-  // Loop over neighbors
-  const unsigned nn=nl->size();
-  for(unsigned int i=rank;i<nn;i+=stride) {
-    double dfunc, d2;
-    Vector distance;
-    Vector distance_versor;
-    unsigned i0=nl->getClosePair(i).first;
-    unsigned i1=nl->getClosePair(i).second;
+  // Loop over central atoms
+  for(unsigned int i=rank;i<getNumberOfAtoms();i+=stride) {
+    double dfunc, d2_ij, d2_ik;
+    //Vector distance_versor;
+    vector<unsigned> neighbors=nl->getNeighbors(i);
+    unsigned neighNumber=neighbors.size();
+    Vector ri=getPosition(i);
+    Vector distance_ij, distance_ik;
+    // First loop over neighbors
+    for(unsigned int j=0;j<(neighNumber-1);j+=1) {
+       unsigned j0=neighbors[j];
+       //if(getAbsoluteIndex(i)==getAbsoluteIndex(j0)) continue;
+       if(pbc){ distance_ij=pbcDistance(ri,getPosition(j0));
+       } else { distance_ij=delta(ri,getPosition(j0)); }
+       if ( (d2_ij=distance_ij[0]*distance_ij[0])<rcut2 && (d2_ij+=distance_ij[1]*distance_ij[1])<rcut2 && (d2_ij+=distance_ij[2]*distance_ij[2])<rcut2) {
+          double inv_d_ij=1./std::sqrt(d2_ij);
+          // Second loop over neighbors
+          for(unsigned int k=j+1;k<neighNumber;k+=1) {
+             unsigned k0=neighbors[k];
+             //if(getAbsoluteIndex(j0)==getAbsoluteIndex(k0)) continue;
+             if(pbc){ distance_ik=pbcDistance(ri,getPosition(k0));
+             } else { distance_ik=delta(ri,getPosition(k0)); }
+             if ( (d2_ik=distance_ik[0]*distance_ik[0])<rcut2 && (d2_ik+=distance_ik[1]*distance_ik[1])<rcut2 && (d2_ik+=distance_ik[2]*distance_ik[2])<rcut2) {
+                double inv_d_ik=1./std::sqrt(d2_ik);
+                double angle=dotProduct(distance_ij,distance_ik)*inv_d_ij*inv_d_ik;
+                //log.printf("Angle of %d, %d, %d is %f \n", i, j0, k0, angle);
+                unsigned bin=std::floor((angle+1.)/deltaAngle);
+                int minBin, maxBin; // These cannot be unsigned
+                // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+                minBin=bin - deltaBin;
+                //if (minBin < 0) minBin=0;
+                //if (minBin > (nhist-1)) minBin=nhist-1;
+                maxBin=bin +  deltaBin;
+                //if (maxBin > (nhist-1)) maxBin=nhist-1;
+                for(int l=minBin;l<maxBin+1;l+=1) {
+                   int h;
+                   if (l<0) {
+                      h=-l-1;
+                   } else if (l>(nhist-1)) {
+                      h=2*nhist-l-1;
+                   } else {
+                      h=l;
+                   }
+                   double x=deltaAngle*(l+0.5)-1;
+                   angleHistogram[h] += kernel(x-angle, dfunc);
+                }
+                ++numberOfTriplets;
+                /*
+                // Reflect values at boundaries
+                if (bin<deltaBin) {
+                   //log.printf("bin is %d and angle is %f \n",bin, angle);
+                   for(int l=0;l<deltaBin;l+=1) {
+                      //log.printf("l is %d and deltaBin is %d and angle is %f \n",l);
+                      double x=deltaAngle*(l+0.5)-1;
+                      double angleReflect = -angle-2.;
+                      angleHistogram[l] += kernel(x-angleReflect, dfunc);
+                   }
+                } else if ((nhist-bin-1)<deltaBin) {
+                   //log.printf("bin is %d and angle is %f \n",bin, angle);
+                   for(int l=(nhist-deltaBin);l<nhist;l+=1) {
+                      //log.printf("l is %d and deltaBin is %d and angle is %f \n",l,deltaBin,angle);
+                      double x=deltaAngle*(l+0.5)-1;
+                      double angleReflect = -angle+2.;
+                      angleHistogram[l] += kernel(x-angleReflect, dfunc);
+                   }
+                }
+                */
+             }
+          }
+       }
+    }
+  }
+  if(!serial){
+    comm.Sum(&angleHistogram[0],nhist);
+    comm.Sum(numberOfTriplets);
+  }
+  double norm=1./numberOfTriplets;
+  // This is the right one
+  //double volume=getBox().determinant();
+  //double density=getNumberOfAtoms()/volume;
+  //double norm=(getNumberOfAtoms()-1)*(getNumberOfAtoms()-2)/(8.*pi*pi*density*density*numberOfTriplets);
+  //log.printf( "Norm %f, density %f, and triplets %d \n", norm,density,numberOfTriplets);
+  vector<double> integrand(nhist);
+  for(int l=0;l<nhist;l+=1) {
+     double x=deltaAngle*(l+0.5)-1;
+     angleHistogram[l] *= norm;
+     //log.printf("angle histo %f %f \n",x,angleHistogram[l]);
+     if (angleHistogram[l]<1.e-10) {
+        integrand[l]=-angleHistogram[l];
+     } else {
+        integrand[l]=angleHistogram[l]*std::log(angleHistogram[l]/0.5);
+     }
+  }
+  if (doOutputGofr && rank==0) outputGofr(angleHistogram);
+  //double coordinationNumber2=8.*pi*pi*density*density*integrate(angleHistogram,deltaAngle);
+  //log.printf( "CoordNumber2 %f \n", coordinationNumber2);
+  //threeBodyEntropy=-(4./3.)*density*density*pi*pi*integrate(integrand,deltaAngle);
+  threeBodyEntropy=-integrate(integrand,deltaAngle);
+    /*
     if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
     if(pbc){
      distance=pbcDistance(getPosition(i0),getPosition(i1));
@@ -285,90 +365,22 @@ void PairEntropy::calculate()
   }
   if(!serial){
     comm.Sum(&gofr[0],nhist);
-    comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
-    comm.Sum(&gofrVirial[0],nhist);
   }
-  // Calculate volume and density
-  double volume=getBox().determinant();
-  double density=getNumberOfAtoms()/volume;
-  // Normalize g(r)
-  double normConstantBase = 2*pi*getNumberOfAtoms()*density;
-  for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    double normConstant = normConstantBase*x*x;
-    gofr[j] /= normConstant;
-    //log.printf(" gofr after %f %f \n",x, gofr[j]);
-    gofrVirial[j] /= normConstant;
-    for(unsigned k=0;k<getNumberOfAtoms();++k){
-      gofrPrime[j][k] /= normConstant;
-    }
-  }
-  // Output of gofr
-  if (doOutputGofr) outputGofr(gofr);
-  // Construct integrand
-  vector<double> integrand(nhist);
-  for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    logGofr[j] = std::log(gofr[j]);
-    if (gofr[j]<1.e-10) {
-      integrand[j] = x*x;
-    } else {
-      integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+1)*x*x;
-    }
-  }
-  // Output of integrands
-  if (doOutputIntegrand) outputIntegrand(integrand);
-  // Integrate to obtain pair entropy;
-  pairEntropy = -2*pi*density*integrate(integrand,deltar);
-  // Construct integrand and integrate derivatives
-  if (!doNotCalculateDerivatives() ) {
-    for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
-      vector<Vector> integrandDerivatives(nhist);
-      for(unsigned k=0;k<nhist;++k){
-        double x=deltar*(k+0.5);
-        if (gofr[k]>1.e-10) {
-          integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*x*x;
-        }
-      }
-      // Integrate
-      deriv[j] = -2*pi*density*integrate(integrandDerivatives,deltar);
-    }
-    comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
-    // Virial of positions
-    // Construct virial integrand
-    vector<Tensor> integrandVirial(nhist);
-    for(unsigned j=0;j<nhist;++j){
-      double x=deltar*(j+0.5);
-      if (gofr[j]>1.e-10) {
-        integrandVirial[j] = gofrVirial[j]*logGofr[j]*x*x;
-      }
-    }
-    // Integrate virial
-    virial = -2*pi*density*integrate(integrandVirial,deltar);
-    // Virial of volume
-    // Construct virial integrand
-    vector<double> integrandVirialVolume(nhist);
-    for(unsigned j=0;j<nhist;j+=1) {
-      double x=deltar*(j+0.5);
-      integrandVirialVolume[j] = (-gofr[j]+1)*x*x;
-    }
-    // Integrate virial
-    virial += -2*pi*density*integrate(integrandVirialVolume,deltar)*Tensor::identity();
-  }
+  */
   // Assign output quantities
-  for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
-  setValue           (pairEntropy);
-  setBoxDerivatives  (virial);
+  //for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
+  setValue           (threeBodyEntropy);
+  //setBoxDerivatives  (virial);
 }
 
-double PairEntropy::kernel(double distance,double&der)const{
+double ThreeBodyEntropy::kernel(double distance,double&der)const{
   // Gaussian function and derivative
   double result = invSqrt2piSigma*std::exp(-distance*distance/sigmaSqr2) ;
   der = -distance*result/sigmaSqr;
   return result;
 }
 
-double PairEntropy::integrate(vector<double> integrand, double delta)const{
+double ThreeBodyEntropy::integrate(vector<double> integrand, double delta)const{
   // Trapezoid rule
   double result = 0.;
   for(unsigned i=1;i<(integrand.size()-1);++i){
@@ -380,7 +392,7 @@ double PairEntropy::integrate(vector<double> integrand, double delta)const{
   return result;
 }
 
-Vector PairEntropy::integrate(vector<Vector> integrand, double delta)const{
+Vector ThreeBodyEntropy::integrate(vector<Vector> integrand, double delta)const{
   // Trapezoid rule
   Vector result;
   for(unsigned i=1;i<(integrand.size()-1);++i){
@@ -392,7 +404,7 @@ Vector PairEntropy::integrate(vector<Vector> integrand, double delta)const{
   return result;
 }
 
-Tensor PairEntropy::integrate(vector<Tensor> integrand, double delta)const{
+Tensor ThreeBodyEntropy::integrate(vector<Tensor> integrand, double delta)const{
   // Trapezoid rule
   Tensor result;
   for(unsigned i=1;i<(integrand.size()-1);++i){
@@ -404,21 +416,21 @@ Tensor PairEntropy::integrate(vector<Tensor> integrand, double delta)const{
   return result;
 }
 
-void PairEntropy::outputGofr(vector<double> gofr) {
+void ThreeBodyEntropy::outputGofr(vector<double> gofr) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("gofr.txt");
   for(unsigned i=0;i<gofr.size();++i){
-     double r=deltar*(i+0.5);
+     double r=deltaAngle*(i+0.5)-1;
      gofrOfile.printField("r",r).printField("gofr",gofr[i]).printField();
   }
   gofrOfile.close();
 }
 
-void PairEntropy::outputIntegrand(vector<double> integrand) {
+void ThreeBodyEntropy::outputIntegrand(vector<double> integrand) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("integrand.txt");
   for(unsigned i=0;i<integrand.size();++i){
-     double r=deltar*(i+0.5);
+     double r=deltaAngle*(i+0.5);
      gofrOfile.printField("r",r).printField("integrand",integrand[i]).printField();
   }
   gofrOfile.close();

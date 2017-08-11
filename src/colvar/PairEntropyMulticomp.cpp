@@ -550,7 +550,7 @@ Tensor PairEntropyMulticomp::integrate(vector<Tensor> integrand, double delta)co
 void PairEntropyMulticomp::outputGofr(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("gofr.txt");
-  for(unsigned i=1;i<gofrAA.size();++i){
+  for(unsigned i=0;i<gofrAA.size();++i){
      double r=deltar*(i+0.5);
      gofrOfile.printField("r",r).printField("gofrAA",gofrAA[i]).printField("gofrAB",gofrAB[i]).printField("gofrBB",gofrBB[i]).printField();
   }
@@ -560,7 +560,7 @@ void PairEntropyMulticomp::outputGofr(vector<double> gofrAA, vector<double> gofr
 void PairEntropyMulticomp::outputIntegrand(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("integrand.txt");
-  for(unsigned i=1;i<gofrAA.size();++i){
+  for(unsigned i=0;i<gofrAA.size();++i){
      double r=deltar*(i+0.5);
      gofrOfile.printField("r",r).printField("integrandAA",gofrAA[i]).printField("integrandAB",gofrAB[i]).printField("integrandBB",gofrBB[i]).printField();
   }
