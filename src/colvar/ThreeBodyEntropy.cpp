@@ -21,6 +21,7 @@
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "Colvar.h"
 #include "ActionRegister.h"
+#include "tools/SwitchingFunction.h"
 #include "tools/NeighborList.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
@@ -68,13 +69,13 @@ class ThreeBodyEntropy : public Colvar {
   NeighborList *nl;
   bool invalidateList;
   bool firsttime;
-  bool doOutputGofr;
-  bool doOutputIntegrand;
-  double maxr, sigma;
+  bool doOutputHisto;
+  //bool realNorm;
+  double sigma;
   unsigned nhist;
   double rcut2;
   double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
-  double deltaAngle;
+  double deltaCosAngle;
   unsigned deltaBin;
   // Integration routines
   double integrate(vector<double> integrand, double delta)const;
@@ -82,9 +83,10 @@ class ThreeBodyEntropy : public Colvar {
   Tensor integrate(vector<Tensor> integrand, double delta)const;
   // Kernel to calculate g(r)
   double kernel(double distance, double&der)const;
-  // Output gofr and integrand
-  void outputGofr(vector<double> gofr);
-  void outputIntegrand(vector<double> integrand);
+  // Output histogram
+  void outputAngleHistogram(vector<double> gofr);
+  // Switching function
+  SwitchingFunction switchingFunction;
 public:
   explicit ThreeBodyEntropy(const ActionOptions&);
   ~ThreeBodyEntropy();
@@ -101,15 +103,23 @@ void ThreeBodyEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("SERIAL",false,"Perform the calculation in serial - for debug purpose");
   keys.addFlag("PAIR",false,"Pair only 1st element of the 1st group with 1st element in the second, etc");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
-  keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
+  keys.addFlag("OUTPUT_HISTOGRAM",false,"Output angle histogram g(cosTheta)");
+  //keys.addFlag("REAL_NORM",false,"Use a norm closer to the real three body entropy");
   //keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("atoms","GROUP","List of atoms");
   //keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
-  keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
+  keys.add("compulsory","NN","6","The n parameter of the switching function ");
+  keys.add("compulsory","MM","0","The m parameter of the switching function; 0 implies 2*NN");
+  keys.add("compulsory","D_0","0.0","The d_0 parameter of the switching function");
+  keys.add("compulsory","R_0","The r_0 parameter of the switching function");
+  keys.add("optional","SWITCH","This keyword is used if you want to employ an alternative to the continuous swiching function defined above. "
+           "The following provides information on the \\ref switchingfunction that are available. "
+           "When this keyword is present you no longer need the NN, MM, D_0 and R_0 keywords.");
+
 }
 
 ThreeBodyEntropy::ThreeBodyEntropy(const ActionOptions&ao):
@@ -121,7 +131,8 @@ firsttime(true)
 {
 
   parseFlag("SERIAL",serial);
-  parseFlag("OUTPUT_GOFR",doOutputGofr);
+  parseFlag("OUTPUT_HISTOGRAM",doOutputHisto);
+  //parseFlag("REAL_NORM",realNorm);
   //parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
 
   vector<AtomNumber> ga_lista,gb_lista;
@@ -171,17 +182,32 @@ firsttime(true)
    log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
   }
 
-  parse("MAXR",maxr);
-  log.printf("Integration in the interval from 0. to %f nm. \n", maxr );
+  string sw,errors;
+  parse("SWITCH",sw);
+  if(sw.length()>0) {
+    switchingFunction.set(sw,errors);
+    if( errors.length()!=0 ) error("problem reading SWITCH keyword : " + errors );
+  } else {
+    int nn=6;
+    int mm=0;
+    double d0=0.0;
+    double r0=0.0;
+    parse("R_0",r0);
+    if(r0<=0.0) error("R_0 should be explicitly specified and positive");
+    parse("D_0",d0);
+    parse("NN",nn);
+    parse("MM",mm);
+    switchingFunction.set(nn,mm,r0,d0);
+  }
+  log<<"  contacts are counted with cutoff "<<switchingFunction.description()<<"\n";
+
   parse("NHIST",nhist);
   log.printf("The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
   parse("SIGMA",sigma);
   log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f nm. \n", sigma);
-  double rcut = maxr; // + 3*sigma;
-  rcut2 = maxr*maxr; //(maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
-  if(doneigh){
-    if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
-  }
+  double rcut = switchingFunction.get_dmax();
+  rcut2 = rcut*rcut;
+
 
   checkRead();
 
@@ -190,8 +216,8 @@ firsttime(true)
   invSqrt2piSigma = 1./sqrt2piSigma;
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
-  deltaAngle=2./nhist;
-  deltaBin = std::floor(3*sigma/deltaAngle); // 3*sigma is hard coded
+  deltaCosAngle=2./nhist;
+  deltaBin = std::floor(3*sigma/deltaCosAngle); // 3*sigma is hard coded
 }
 
 ThreeBodyEntropy::~ThreeBodyEntropy(){
@@ -219,10 +245,17 @@ void ThreeBodyEntropy::calculate()
   // Define output quantities
   double threeBodyEntropy;
   vector<Vector> deriv(getNumberOfAtoms());
-  vector<double> angleHistogram(nhist);
-  vector<double> angleHistogram2(nhist);
   Tensor virial;
-  int numberOfTriplets = 0;
+  // Define useful quantities
+  vector<double> angleHistogram(nhist);
+  Matrix<Vector> angleHistogramPrimeNumerator(nhist,getNumberOfAtoms());
+  vector<Vector> angleHistogramPrimeDenominator(getNumberOfAtoms());
+  vector<Tensor> angleHistogramVirialNumerator(nhist);
+  Tensor angleHistogramVirialDenominator;
+  // Other variables
+  double numberOfTriplets = 0.;
+  double dfunc, d2_ij, d2_ik;
+  double df_ij, df_ik;
   // Setup neighbor list and parallelization
   if(nl->getStride()>0 && invalidateList){
     nl->update(getPositions());
@@ -238,8 +271,6 @@ void ThreeBodyEntropy::calculate()
   }
   // Loop over central atoms
   for(unsigned int i=rank;i<getNumberOfAtoms();i+=stride) {
-    double dfunc, d2_ij, d2_ik;
-    //Vector distance_versor;
     vector<unsigned> neighbors=nl->getNeighbors(i);
     unsigned neighNumber=neighbors.size();
     Vector ri=getPosition(i);
@@ -247,22 +278,32 @@ void ThreeBodyEntropy::calculate()
     // First loop over neighbors
     for(unsigned int j=0;j<(neighNumber-1);j+=1) {
        unsigned j0=neighbors[j];
-       //if(getAbsoluteIndex(i)==getAbsoluteIndex(j0)) continue;
        if(pbc){ distance_ij=pbcDistance(ri,getPosition(j0));
        } else { distance_ij=delta(ri,getPosition(j0)); }
        if ( (d2_ij=distance_ij[0]*distance_ij[0])<rcut2 && (d2_ij+=distance_ij[1]*distance_ij[1])<rcut2 && (d2_ij+=distance_ij[2]*distance_ij[2])<rcut2) {
           double inv_d_ij=1./std::sqrt(d2_ij);
           // Second loop over neighbors
+          double sw_ij = switchingFunction.calculateSqr( d2_ij, df_ij );
           for(unsigned int k=j+1;k<neighNumber;k+=1) {
              unsigned k0=neighbors[k];
-             //if(getAbsoluteIndex(j0)==getAbsoluteIndex(k0)) continue;
              if(pbc){ distance_ik=pbcDistance(ri,getPosition(k0));
              } else { distance_ik=delta(ri,getPosition(k0)); }
              if ( (d2_ik=distance_ik[0]*distance_ik[0])<rcut2 && (d2_ik+=distance_ik[1]*distance_ik[1])<rcut2 && (d2_ik+=distance_ik[2]*distance_ik[2])<rcut2) {
+                double sw_ik = switchingFunction.calculateSqr( d2_ik, df_ik );
+                double sw_ij_sw_ik=sw_ij*sw_ik;
                 double inv_d_ik=1./std::sqrt(d2_ik);
-                double angle=dotProduct(distance_ij,distance_ik)*inv_d_ij*inv_d_ik;
+                double inv_d_ij_inv_d_ik=inv_d_ij*inv_d_ik;
+                double cosAngle=dotProduct(distance_ij,distance_ik)*inv_d_ij*inv_d_ik;
                 //log.printf("Angle of %d, %d, %d is %f \n", i, j0, k0, angle);
-                unsigned bin=std::floor((angle+1.)/deltaAngle);
+                unsigned bin=std::floor((cosAngle+1.)/deltaCosAngle);
+                // We calculate the derivatives of the numerator = normalization = number of triplets
+                Vector der_denom_ij = distance_ij * df_ij * sw_ik;
+                Vector der_denom_ik = sw_ij * distance_ik * df_ik;
+                angleHistogramPrimeDenominator[i] -= der_denom_ij + der_denom_ik;
+                angleHistogramPrimeDenominator[j0] += der_denom_ij;
+                angleHistogramPrimeDenominator[k0] += der_denom_ik;
+                angleHistogramVirialDenominator -= Tensor(distance_ij,der_denom_ij) + Tensor(distance_ik,der_denom_ik);
+                numberOfTriplets += sw_ij*sw_ik;
                 int minBin, maxBin; // These cannot be unsigned
                 // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
                 minBin=bin - deltaBin;
@@ -279,30 +320,18 @@ void ThreeBodyEntropy::calculate()
                    } else {
                       h=l;
                    }
-                   double x=deltaAngle*(l+0.5)-1;
-                   angleHistogram[h] += kernel(x-angle, dfunc);
+                   double x=deltaCosAngle*(l+0.5)-1;
+                   double kernelValue=kernel(x-cosAngle, dfunc);
+                   angleHistogram[h] += kernelValue*sw_ij*sw_ik;
+                   // The following are the derivatives of angleHistogram with respect to r_j and r_k
+                   Vector value_ij =  kernelValue * der_denom_ij - dfunc*sw_ij_sw_ik*( inv_d_ij_inv_d_ik * distance_ik - (cosAngle/d2_ij)* distance_ij);
+                   Vector value_ik =  kernelValue * der_denom_ik - dfunc*sw_ij_sw_ik*( inv_d_ij_inv_d_ik * distance_ij - (cosAngle/d2_ik)* distance_ik);
+                   // Afterwards we will normalize the histogram, thus we refer to these derivatives as those of the numerator
+                   angleHistogramPrimeNumerator[h][i] -= value_ij+value_ik;
+                   angleHistogramPrimeNumerator[h][j0] += value_ij;
+                   angleHistogramPrimeNumerator[h][k0] += value_ik;
+                   angleHistogramVirialNumerator[h] -= Tensor(distance_ij,value_ij)+Tensor(distance_ik,value_ik);
                 }
-                ++numberOfTriplets;
-                /*
-                // Reflect values at boundaries
-                if (bin<deltaBin) {
-                   //log.printf("bin is %d and angle is %f \n",bin, angle);
-                   for(int l=0;l<deltaBin;l+=1) {
-                      //log.printf("l is %d and deltaBin is %d and angle is %f \n",l);
-                      double x=deltaAngle*(l+0.5)-1;
-                      double angleReflect = -angle-2.;
-                      angleHistogram[l] += kernel(x-angleReflect, dfunc);
-                   }
-                } else if ((nhist-bin-1)<deltaBin) {
-                   //log.printf("bin is %d and angle is %f \n",bin, angle);
-                   for(int l=(nhist-deltaBin);l<nhist;l+=1) {
-                      //log.printf("l is %d and deltaBin is %d and angle is %f \n",l,deltaBin,angle);
-                      double x=deltaAngle*(l+0.5)-1;
-                      double angleReflect = -angle+2.;
-                      angleHistogram[l] += kernel(x-angleReflect, dfunc);
-                   }
-                }
-                */
              }
           }
        }
@@ -310,67 +339,60 @@ void ThreeBodyEntropy::calculate()
   }
   if(!serial){
     comm.Sum(&angleHistogram[0],nhist);
+    comm.Sum(&angleHistogramPrimeNumerator[0][0],nhist*getNumberOfAtoms());
+    comm.Sum(&angleHistogramPrimeDenominator[0],getNumberOfAtoms());
+    comm.Sum(&angleHistogramVirialNumerator[0],nhist);
+    comm.Sum(angleHistogramVirialDenominator);
     comm.Sum(numberOfTriplets);
   }
-  double norm=1./numberOfTriplets;
-  // This is the right one
-  //double volume=getBox().determinant();
-  //double density=getNumberOfAtoms()/volume;
-  //double norm=(getNumberOfAtoms()-1)*(getNumberOfAtoms()-2)/(8.*pi*pi*density*density*numberOfTriplets);
-  //log.printf( "Norm %f, density %f, and triplets %d \n", norm,density,numberOfTriplets);
+  double volume=getBox().determinant();
+  double density=getNumberOfAtoms()/volume;
+  double norm;
+  double valueIdealGas=0.5;
+  norm=1./numberOfTriplets;
   vector<double> integrand(nhist);
   for(int l=0;l<nhist;l+=1) {
-     double x=deltaAngle*(l+0.5)-1;
      angleHistogram[l] *= norm;
-     //log.printf("angle histo %f %f \n",x,angleHistogram[l]);
      if (angleHistogram[l]<1.e-10) {
-        integrand[l]=-angleHistogram[l];
+        integrand[l]=-valueIdealGas*angleHistogram[l];
      } else {
-        integrand[l]=angleHistogram[l]*std::log(angleHistogram[l]/0.5);
+        integrand[l]=angleHistogram[l]*std::log(angleHistogram[l]/valueIdealGas);
      }
   }
-  if (doOutputGofr && rank==0) outputGofr(angleHistogram);
-  //double coordinationNumber2=8.*pi*pi*density*density*integrate(angleHistogram,deltaAngle);
+
+  if (doOutputHisto && rank==0) outputAngleHistogram(angleHistogram);
   //log.printf( "CoordNumber2 %f \n", coordinationNumber2);
-  //threeBodyEntropy=-(4./3.)*density*density*pi*pi*integrate(integrand,deltaAngle);
-  threeBodyEntropy=-integrate(integrand,deltaAngle);
-    /*
-    if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-    if(pbc){
-     distance=pbcDistance(getPosition(i0),getPosition(i1));
-    } else {
-     distance=delta(getPosition(i0),getPosition(i1));
+  threeBodyEntropy=-integrate(integrand,deltaCosAngle);
+  // Derivatives
+  if (!doNotCalculateDerivatives() ) {
+    // Construct derivatives
+    for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
+      vector<Vector> integrandDerivatives(nhist);
+      for(int l=0;l<nhist;l+=1) {
+        if (angleHistogram[l]>1.e-10) {
+          Vector angleHistogramPrime = (angleHistogramPrimeNumerator[l][j] - angleHistogram[l]*angleHistogramPrimeDenominator[j]) * 1./numberOfTriplets ;
+          integrandDerivatives[l] = angleHistogramPrime*(std::log(angleHistogram[l]/valueIdealGas)+1.);
+        }
+      }
+      // Integrate
+      deriv[j] = -integrate(integrandDerivatives,deltaCosAngle);
     }
-    if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-      double distanceModulo=std::sqrt(d2);
-      Vector distance_versor = distance / distanceModulo;
-      unsigned bin=std::floor(distanceModulo/deltar);
-      int minBin, maxBin; // These cannot be unsigned
-      // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-      minBin=bin - deltaBin;
-      if (minBin < 0) minBin=0;
-      if (minBin > (nhist-1)) minBin=nhist-1;
-      maxBin=bin +  deltaBin;
-      if (maxBin > (nhist-1)) maxBin=nhist-1;
-      for(int k=minBin;k<maxBin+1;k+=1) {
-        double x=deltar*(k+0.5);
-        gofr[k] += kernel(x-distanceModulo, dfunc);
-        Vector value = dfunc * distance_versor;
-        gofrPrime[k][i0] += value;
-        gofrPrime[k][i1] -= value;
-        Tensor vv(value, distance);
-        gofrVirial[k] += vv;
+    comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+    // Virial
+    vector<Tensor> integrandVirial(nhist);
+    for(int l=0;l<nhist;l+=1) {
+      if (angleHistogram[l]>1.e-10) {
+        Tensor angleHistogramVirial = (angleHistogramVirialNumerator[l] - angleHistogram[l]*angleHistogramVirialDenominator) * 1./numberOfTriplets ;
+        integrandVirial[l] = angleHistogramVirial*(std::log(angleHistogram[l]/valueIdealGas)+1.);
       }
     }
+    // Integrate
+    virial = -integrate(integrandVirial,deltaCosAngle);
   }
-  if(!serial){
-    comm.Sum(&gofr[0],nhist);
-  }
-  */
   // Assign output quantities
-  //for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
   setValue           (threeBodyEntropy);
-  //setBoxDerivatives  (virial);
+  for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
+  setBoxDerivatives  (virial);
 }
 
 double ThreeBodyEntropy::kernel(double distance,double&der)const{
@@ -416,26 +438,15 @@ Tensor ThreeBodyEntropy::integrate(vector<Tensor> integrand, double delta)const{
   return result;
 }
 
-void ThreeBodyEntropy::outputGofr(vector<double> gofr) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open("gofr.txt");
-  for(unsigned i=0;i<gofr.size();++i){
-     double r=deltaAngle*(i+0.5)-1;
-     gofrOfile.printField("r",r).printField("gofr",gofr[i]).printField();
+void ThreeBodyEntropy::outputAngleHistogram(vector<double> histo) {
+  PLMD::OFile histoOfile;
+  histoOfile.open("histogram.txt");
+  for(unsigned i=0;i<histo.size();++i){
+     double x=deltaCosAngle*(i+0.5)-1;
+     histoOfile.printField("cosTheta",x).printField("histo",histo[i]).printField();
   }
-  gofrOfile.close();
+  histoOfile.close();
 }
-
-void ThreeBodyEntropy::outputIntegrand(vector<double> integrand) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open("integrand.txt");
-  for(unsigned i=0;i<integrand.size();++i){
-     double r=deltaAngle*(i+0.5);
-     gofrOfile.printField("r",r).printField("integrand",integrand[i]).printField();
-  }
-  gofrOfile.close();
-}
-
 
 }
 }
