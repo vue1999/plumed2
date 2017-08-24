@@ -207,6 +207,8 @@ firsttime(true)
   log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f nm. \n", sigma);
   double rcut = switchingFunction.get_dmax();
   rcut2 = rcut*rcut;
+  if(doneigh && nl_cut<=rcut) error("NL_CUTOFF should be greater than the switching function's DMAX");
+
 
 
   checkRead();
