@@ -304,7 +304,7 @@ void PairEntropy::calculate()
     }
   }
   // Output of gofr
-  if (doOutputGofr) outputGofr(gofr);
+  if (doOutputGofr && rank==0) outputGofr(gofr);
   // Construct integrand
   vector<double> integrand(nhist);
   for(unsigned j=0;j<nhist;++j){
@@ -317,7 +317,7 @@ void PairEntropy::calculate()
     }
   }
   // Output of integrands
-  if (doOutputIntegrand) outputIntegrand(integrand);
+  if (doOutputIntegrand && rank==0) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
   pairEntropy = -2*pi*density*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
