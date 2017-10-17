@@ -332,6 +332,7 @@ void PairOrientationalEntropy::calculate()
            pos[0]=x-distanceModulo;
            pos[1]=theta-cosAngle;
            if (l==(nhist_[1]-1)) gofr[k][h] += 2*kernel(pos, dfunc);
+           else if (l==0) gofr[k][h] += 2*kernel(pos, dfunc);
            else gofr[k][h] += kernel(pos, dfunc);
         }
       }
