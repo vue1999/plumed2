@@ -66,10 +66,12 @@ PAIRENTROPY ...
 class PairOrientationalEntropy : public Colvar {
   bool pbc;
   bool serial;
-  NeighborList *nl;
+  //NeighborList *nl;
+  std::unique_ptr<NeighborList> nl;
   bool invalidateList;
   bool firsttime;
   bool doOutputGofr;
+  int outputStride;
   bool doOutputIntegrand;
   double maxr, sigma;
   unsigned nhist;
@@ -94,7 +96,7 @@ class PairOrientationalEntropy : public Colvar {
   void outputGofr(Matrix<double> gofr, const char* fileName);
   void outputIntegrand(vector<double> integrand);
   void output1Dfunction(vector<double> y, vector<double> x, const char* fileName);
-  vector<AtomNumber> center_lista,start_lista,end_lista;
+  vector<AtomNumber> center_lista,start_lista,end_lista,origin_lista;
   std::vector<PLMD::AtomNumber> atomsToRequest;
   Matrix<double> avgGofr;
   unsigned iteration;
@@ -115,9 +117,11 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("PAIR",false,"Pair only 1st element of the 1st group with 1st element in the second, etc");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
+  keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
+  keys.add("atoms","ORIGIN","Define an atom that represents the origin from which to calculate the g(r,theta)");
   keys.add("atoms","CENTER","Center atoms");
   keys.add("atoms","START","Start point of vector defining orientation");
   keys.add("atoms","END","End point of vector defining orientation");
@@ -139,7 +143,12 @@ firsttime(true)
   parseFlag("SERIAL",serial);
   parseFlag("OUTPUT_GOFR",doOutputGofr);
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
+  outputStride=1;
+  parse("OUTPUT_STRIDE",outputStride);
 
+  parseAtomList("ORIGIN",origin_lista);
+  if (origin_lista.size()==1) log.printf("Using an origin to calculate the correlation functions. Origin is atom with serial %d \n",origin_lista[0].serial() );
+  if (origin_lista.size()>1) error("Only one atom can be specifiec as origin. Introduce only one atom label in the keyword ORIGIN.");
   parseAtomList("CENTER",center_lista);
   parseAtomList("START",start_lista);
   parseAtomList("END",end_lista);
@@ -167,13 +176,26 @@ firsttime(true)
   }
 
   //addValueWithDerivatives(); setNotPeriodic();
-  if(doneigh)  nl= new NeighborList(center_lista,pbc,getPbc(),nl_cut,nl_st);
-  else         nl= new NeighborList(center_lista,pbc,getPbc());
+  if (origin_lista.size()>0) {
+     if(doneigh)  nl.reset( new NeighborList(origin_lista,center_lista,dopair,pbc,getPbc(),nl_cut,nl_st) );
+     else         nl.reset( new NeighborList(origin_lista,center_lista,dopair,pbc,getPbc()) );
+  } else {
+     if(doneigh)  nl.reset( new NeighborList(center_lista,pbc,getPbc(),nl_cut,nl_st) );
+     else         nl.reset( new NeighborList(center_lista,pbc,getPbc()) );
+  }
 
-  atomsToRequest.reserve ( center_lista.size() + start_lista.size() + end_lista.size() );
-  atomsToRequest.insert (atomsToRequest.end(), center_lista.begin(), center_lista.end() );
-  atomsToRequest.insert (atomsToRequest.end(), start_lista.begin(), start_lista.end() );
-  atomsToRequest.insert (atomsToRequest.end(), end_lista.begin(), end_lista.end() );
+  if (origin_lista.size()>0) {
+     atomsToRequest.reserve ( origin_lista.size() + center_lista.size() + start_lista.size() + end_lista.size());
+     atomsToRequest.insert (atomsToRequest.end(), origin_lista.begin(), origin_lista.end() );
+     atomsToRequest.insert (atomsToRequest.end(), center_lista.begin(), center_lista.end() );
+     atomsToRequest.insert (atomsToRequest.end(), start_lista.begin(), start_lista.end() );
+     atomsToRequest.insert (atomsToRequest.end(), end_lista.begin(), end_lista.end() );
+  } else {
+     atomsToRequest.reserve ( center_lista.size() + start_lista.size() + end_lista.size() );
+     atomsToRequest.insert (atomsToRequest.end(), center_lista.begin(), center_lista.end() );
+     atomsToRequest.insert (atomsToRequest.end(), start_lista.begin(), start_lista.end() );
+     atomsToRequest.insert (atomsToRequest.end(), end_lista.begin(), end_lista.end() );
+  }
   requestAtoms(atomsToRequest);
 
   if(pbc) log.printf("  using periodic boundary conditions\n");
@@ -230,7 +252,7 @@ firsttime(true)
 }
 
 PairOrientationalEntropy::~PairOrientationalEntropy(){
-  delete nl;
+  //delete nl;
 }
 
 void PairOrientationalEntropy::prepare(){
@@ -278,6 +300,7 @@ void PairOrientationalEntropy::calculate()
     unsigned i0=nl->getClosePair(i).first;
     unsigned i1=nl->getClosePair(i).second;
     if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+    //log.printf("Center1 %d Center2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1) );
     if(pbc){
      distance=pbcDistance(getPosition(i0),getPosition(i1));
     } else {
@@ -291,9 +314,11 @@ void PairOrientationalEntropy::calculate()
       unsigned atom2_mol1=i0+center_lista.size()+start_lista.size();
       unsigned atom1_mol2=i1+center_lista.size();
       unsigned atom2_mol2=i1+center_lista.size()+start_lista.size();
-      Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      //log.printf("Center1 %d Center2 %d atom1_mol2 %d atom1_mol2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1), getAbsoluteIndex(atom1_mol2), getAbsoluteIndex(atom2_mol2) );
+      //Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
       //Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-      Vector mol_vector2=pbcDistance(getPosition(i0),getPosition(i1));
+      Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
+      Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
       double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
       double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
       double inv_v1=1./norm_v1;
@@ -349,7 +374,12 @@ void PairOrientationalEntropy::calculate()
   double volume=getBox().determinant();
   double density=center_lista.size()/volume;
   // Normalize g(r)
-  double normConstantBase = 2*pi*center_lista.size()*density;
+  double normConstantBase;
+  if (origin_lista.size()>0) {
+     normConstantBase = 4*pi*density;
+  } else {
+     normConstantBase = 2*pi*center_lista.size()*density;
+  }
   // Take into account "volume" of angles
   double volumeOfAngles = 2.;
   normConstantBase /= volumeOfAngles;
@@ -368,13 +398,13 @@ void PairOrientationalEntropy::calculate()
   }
   iteration += 1;
   // Output of gofr
-  if (doOutputGofr && rank==0) outputGofr(gofr,"gofr.txt");
+  if (doOutputGofr && (getStep()%outputStride==0) && rank==0) outputGofr(gofr,"gofr.txt");
   vector<double> gofrMarginalR(nhist_[0]);
   gofrMarginalR=integrateMarginal(gofr,deltaCosAngle,1);
   for(unsigned i=0;i<nhist_[0];++i){
      gofrMarginalR[i] /= volumeOfAngles;
   }
-  if (doOutputGofr && rank==0) {
+  if (doOutputGofr && (getStep()%outputStride==0) && rank==0) {
      output1Dfunction(gofrMarginalR, x1, "marginal.txt");
   }
   Matrix<double> ConditionalDistr(nhist_[0], nhist_[1]);
@@ -387,13 +417,13 @@ void PairOrientationalEntropy::calculate()
         else integrand[i][j] = -ConditionalDistr[i][j];
      }
   }
-  if (doOutputGofr && rank==0) outputGofr(ConditionalDistr,"conditional.txt");
+  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) outputGofr(ConditionalDistr,"conditional.txt");
   vector<double> OLE(nhist_[0]);
   OLE = integrateMarginal(integrand,deltaCosAngle,1);
   for(unsigned i=0;i<nhist_[0];++i){
      OLE[i] *= -2*pi/volumeOfAngles;
   }
-  if (doOutputGofr && rank==0) {
+  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
      output1Dfunction(OLE, x1, "OLE.txt");
   }
   // Build integrands for orientational and translational part of the pair entropy
@@ -409,10 +439,10 @@ void PairOrientationalEntropy::calculate()
     }
     integrandOrientation[j] = gofrMarginalR[j]*OLE[j]*x*x;
   }
-  if (doOutputGofr && rank==0) {
+  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
      output1Dfunction(integrandTranslation, x1, "integrandTranslation.txt");
   }
-  if (doOutputGofr && rank==0) {
+  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
      output1Dfunction(integrandOrientation, x1, "integrandOrientation.txt");
   }
   // Output of integrands
