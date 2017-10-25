@@ -76,6 +76,7 @@ class PairEntropy : public Colvar {
   double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
   double deltar;
   unsigned deltaBin;
+  double density_given;
   // Integration routines
   double integrate(vector<double> integrand, double delta)const;
   Vector integrate(vector<Vector> integrand, double delta)const;
@@ -105,6 +106,7 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
+  keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
   keys.add("atoms","GROUPA","First list of atoms");
   keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
@@ -147,6 +149,11 @@ firsttime(true)
    parse("NL_STRIDE",nl_st);
    if(nl_st<=0) error("NL_STRIDE should be explicitly specified and positive");
   }
+
+  density_given = -1;
+  parse("DENSITY",density_given);
+  if (density_given>0) log.printf("The g(r) will be normalized with a density %f . \n", density_given);
+  else log.printf("The g(r) will be normalized with a density N/V . \n");
 
   addValueWithDerivatives(); setNotPeriodic();
   if(gb_lista.size()>0){
@@ -200,6 +207,7 @@ firsttime(true)
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
   deltar=maxr/nhist;
+  if(deltar>sigma) error("Bin size too large! Increase NHIST");
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
 }
 
@@ -290,7 +298,9 @@ void PairEntropy::calculate()
   }
   // Calculate volume and density
   double volume=getBox().determinant();
-  double density=getNumberOfAtoms()/volume;
+   double density;
+   if (density_given>0) density=density_given;
+   else density=getNumberOfAtoms()/volume;
   // Normalize g(r)
   double normConstantBase = 2*pi*getNumberOfAtoms()*density;
   for(unsigned j=0;j<nhist;++j){
@@ -346,14 +356,16 @@ void PairEntropy::calculate()
     // Integrate virial
     virial = -2*pi*density*integrate(integrandVirial,deltar);
     // Virial of volume
-    // Construct virial integrand
-    vector<double> integrandVirialVolume(nhist);
-    for(unsigned j=0;j<nhist;j+=1) {
-      double x=deltar*(j+0.5);
-      integrandVirialVolume[j] = (-gofr[j]+1)*x*x;
-    }
-    // Integrate virial
-    virial += -2*pi*density*integrate(integrandVirialVolume,deltar)*Tensor::identity();
+    if (density_given<0) {
+      // Construct virial integrand
+      vector<double> integrandVirialVolume(nhist);
+      for(unsigned j=0;j<nhist;j+=1) {
+        double x=deltar*(j+0.5);
+        integrandVirialVolume[j] = (-gofr[j]+1)*x*x;
+      }
+      // Integrate virial
+      virial += -2*pi*density*integrate(integrandVirialVolume,deltar)*Tensor::identity();
+      }
   }
   // Assign output quantities
   for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
