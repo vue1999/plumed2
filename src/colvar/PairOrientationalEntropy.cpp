@@ -71,6 +71,7 @@ class PairOrientationalEntropy : public Colvar {
   bool invalidateList;
   bool firsttime;
   bool doOutputGofr;
+  bool doAverageGofr;
   int outputStride;
   bool doOutputIntegrand;
   double maxr, sigma;
@@ -117,6 +118,7 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("PAIR",false,"Pair only 1st element of the 1st group with 1st element in the second, etc");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
+  keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
@@ -142,6 +144,7 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
   parseFlag("OUTPUT_GOFR",doOutputGofr);
+  parseFlag("AVERAGE_GOFR",doAverageGofr);
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
   outputStride=1;
   parse("OUTPUT_STRIDE",outputStride);
@@ -217,7 +220,7 @@ firsttime(true)
   sigma=sigma_[0];
   log.printf("The pair distribution function is calculated with a Gaussian kernel with deviations %f and %f \n", sigma_[0], sigma_[1]);
   double rcut = maxr + 3*sigma_[0];
-  rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma_[0]);  // 3*sigma is hard coded
+  rcut2 = (maxr + 3*sigma_[0])*(maxr + 3*sigma_[0]);  // 3*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
   }
@@ -231,11 +234,14 @@ firsttime(true)
   sigmaSqr = sigma*sigma;
   deltar=maxr/(nhist_[0]-1);
   deltaCosAngle=2./(nhist_[1]-1);
-  deltaBin = std::floor(4*sigma_[0]/deltar); // 4*sigma is hard coded
-  deltaBinAngle = std::floor(4*sigma_[1]/deltaCosAngle); // 4*sigma is hard coded
+  deltaBin = std::floor(3*sigma_[0]/deltar); // 3*sigma is hard coded
+  deltaBinAngle = std::floor(3*sigma_[1]/deltaCosAngle); // 3*sigma is hard coded
 
-  iteration = 1;
-  avgGofr.resize(nhist_[0],nhist_[1]);
+  if (doAverageGofr) {
+     iteration = 1;
+     avgGofr.resize(nhist_[0],nhist_[1]);
+  }
+
   x1.resize(nhist_[0]);
   x2.resize(nhist_[1]);
   for(unsigned j=0;j<nhist_[0];++j){
@@ -315,9 +321,9 @@ void PairOrientationalEntropy::calculate()
       unsigned atom1_mol2=i1+center_lista.size();
       unsigned atom2_mol2=i1+center_lista.size()+start_lista.size();
       //log.printf("Center1 %d Center2 %d atom1_mol2 %d atom1_mol2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1), getAbsoluteIndex(atom1_mol2), getAbsoluteIndex(atom2_mol2) );
-      //Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
       //Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-      Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
+      //Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
       Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
       double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
       double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
@@ -390,13 +396,15 @@ void PairOrientationalEntropy::calculate()
        gofr[j][k] /= normConstant;
     }
   }
-  for(unsigned i=0;i<nhist_[0];++i){
-     for(unsigned j=0;j<nhist_[1];++j){
-        avgGofr[i][j] += (gofr[i][j]-avgGofr[i][j])/( (double) iteration);
-        gofr[i][j] = avgGofr[i][j];
+  if (doAverageGofr) {
+     for(unsigned i=0;i<nhist_[0];++i){
+        for(unsigned j=0;j<nhist_[1];++j){
+           avgGofr[i][j] += (gofr[i][j]-avgGofr[i][j])/( (double) iteration);
+           gofr[i][j] = avgGofr[i][j];
+        }
      }
+     iteration += 1;
   }
-  iteration += 1;
   // Output of gofr
   if (doOutputGofr && (getStep()%outputStride==0) && rank==0) outputGofr(gofr,"gofr.txt");
   vector<double> gofrMarginalR(nhist_[0]);

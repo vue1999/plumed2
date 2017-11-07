@@ -24,6 +24,7 @@
 #include "tools/NeighborList.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
+#include "tools/IFile.h"
 
 #include <string>
 
@@ -68,8 +69,10 @@ class PairEntropy : public Colvar {
   NeighborList *nl;
   bool invalidateList;
   bool firsttime;
+  // Output
   bool doOutputGofr;
   bool doOutputIntegrand;
+  unsigned outputStride;
   double maxr, sigma;
   unsigned nhist;
   double rcut2;
@@ -77,6 +80,7 @@ class PairEntropy : public Colvar {
   double deltar;
   unsigned deltaBin;
   double density_given;
+  std::vector<double> vectorX, vectorX2;
   // Integration routines
   double integrate(vector<double> integrand, double delta)const;
   Vector integrate(vector<Vector> integrand, double delta)const;
@@ -86,6 +90,13 @@ class PairEntropy : public Colvar {
   // Output gofr and integrand
   void outputGofr(vector<double> gofr);
   void outputIntegrand(vector<double> integrand);
+  // Reference g(r)
+  bool doReferenceGofr;
+  std::vector<double> referenceGofr;
+  // Average g(r)
+  bool doAverageGofr;
+  vector<double> avgGofr;
+  unsigned iteration;
 public:
   explicit PairEntropy(const ActionOptions&);
   ~PairEntropy();
@@ -104,6 +115,8 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
+  keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
+  keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
@@ -112,6 +125,7 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
+  keys.add("optional","REFERENCE_GOFR_FNAME","the name of the file with the reference g(r)");
 }
 
 PairEntropy::PairEntropy(const ActionOptions&ao):
@@ -123,8 +137,6 @@ firsttime(true)
 {
 
   parseFlag("SERIAL",serial);
-  parseFlag("OUTPUT_GOFR",doOutputGofr);
-  parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
 
   vector<AtomNumber> ga_lista,gb_lista;
   parseAtomList("GROUPA",ga_lista);
@@ -192,11 +204,47 @@ firsttime(true)
   parse("NHIST",nhist);
   log.printf("The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
   parse("SIGMA",sigma);
-  log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f nm. \n", sigma);
+  log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f . \n", sigma);
   double rcut = maxr + 3*sigma;
   rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
+  }
+ 
+  doOutputGofr=false;
+  parseFlag("OUTPUT_GOFR",doOutputGofr);
+  if (doOutputGofr) log.printf("The g(r) will be written to a file \n.");
+  doOutputIntegrand=false;
+  parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
+  if (doOutputIntegrand) log.printf("The integrand will be written to a file \n.");
+  outputStride=1;
+  parse("OUTPUT_STRIDE",outputStride);
+  if (outputStride!=1 && !doOutputGofr && !doOutputIntegrand) error("Cannot specify OUTPUT_STRIDE if OUTPUT_GOFR or OUTPUT_INTEGRAND not used");
+  if (outputStride<1) error("The output stride specified with OUTPUT_STRIDE must be greater than or equal to one.");
+  if (outputStride>1) log.printf("The output stride to write g(r) or the integrand is %d \n", outputStride);
+
+  doReferenceGofr=false;
+  std::string referenceGofrFileName;
+  parse("REFERENCE_GOFR_FNAME",referenceGofrFileName); 
+  if (!referenceGofrFileName.empty() ) {
+    log.printf("Reading a reference g(r) from the file %s . \n", referenceGofrFileName.c_str() );
+    doReferenceGofr=true;
+    IFile ifile; 
+    ifile.link(*this);
+    ifile.open(referenceGofrFileName);
+    referenceGofr.resize(nhist);
+    for(unsigned int i=0;i<nhist;i+=1) {
+       double tmp_r;
+       ifile.scanField("r",tmp_r).scanField("gofr",referenceGofr[i]).scanField();
+    }
+  }
+
+  doAverageGofr=false;
+  parseFlag("AVERAGE_GOFR",doAverageGofr);
+  if (doAverageGofr) {
+     iteration = 1;
+     log.printf("The g(r) will be averaged over all frames");
+     avgGofr.resize(nhist);
   }
 
   checkRead();
@@ -209,6 +257,12 @@ firsttime(true)
   deltar=maxr/nhist;
   if(deltar>sigma) error("Bin size too large! Increase NHIST");
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
+  vectorX.resize(nhist);
+  vectorX2.resize(nhist);
+  for(unsigned i=0;i<nhist;++i){
+    vectorX[i]=deltar*(i+0.5);
+    vectorX2[i]=vectorX[i]*vectorX[i];
+  }
 }
 
 PairEntropy::~PairEntropy(){
@@ -281,8 +335,7 @@ void PairEntropy::calculate()
       maxBin=bin +  deltaBin;
       if (maxBin > (nhist-1)) maxBin=nhist-1;
       for(int k=minBin;k<maxBin+1;k+=1) {
-        double x=deltar*(k+0.5);
-        gofr[k] += kernel(x-distanceModulo, dfunc);
+        gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
         Vector value = dfunc * distance_versor;
         gofrPrime[k][i0] += value;
         gofrPrime[k][i1] -= value;
@@ -304,30 +357,49 @@ void PairEntropy::calculate()
   // Normalize g(r)
   double normConstantBase = 2*pi*getNumberOfAtoms()*density;
   for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    double normConstant = normConstantBase*x*x;
+    double normConstant = normConstantBase*vectorX2[j];
     gofr[j] /= normConstant;
-    //log.printf(" gofr after %f %f \n",x, gofr[j]);
     gofrVirial[j] /= normConstant;
     for(unsigned k=0;k<getNumberOfAtoms();++k){
       gofrPrime[j][k] /= normConstant;
     }
   }
+  // Average g(r)
+  if (doAverageGofr) {
+     for(unsigned i=0;i<nhist;++i){
+        avgGofr[i] += (gofr[i]-avgGofr[i])/( (double) iteration);
+        gofr[i] = avgGofr[i];
+     }
+     iteration += 1;
+  }
   // Output of gofr
-  if (doOutputGofr && rank==0) outputGofr(gofr);
+  if (doOutputGofr && (getStep()%outputStride==0) && rank==0 ) outputGofr(gofr);
   // Construct integrand
   vector<double> integrand(nhist);
   for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    logGofr[j] = std::log(gofr[j]);
-    if (gofr[j]<1.e-10) {
-      integrand[j] = x*x;
+    if (doReferenceGofr) {
+       if (referenceGofr[j]<1.e-10) {
+          // Not sure about this choice
+          logGofr[j] = 0.;
+       } else {
+          logGofr[j] = std::log(gofr[j]/referenceGofr[j]);
+       }
+       if (gofr[j]<1.e-10) {
+          integrand[j] = referenceGofr[j]*vectorX2[j];
+       } else {
+          integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+referenceGofr[j])*vectorX2[j];
+       }
     } else {
-      integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+1)*x*x;
+       logGofr[j] = std::log(gofr[j]);
+       if (gofr[j]<1.e-10) {
+          integrand[j] = vectorX2[j];
+       } else {
+          integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+1)*vectorX2[j];
+       }
     }
   }
   // Output of integrands
-  if (doOutputIntegrand && rank==0) outputIntegrand(integrand);
+  if (doOutputIntegrand && (getStep()%outputStride==0) && rank==0 ) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
   pairEntropy = -2*pi*density*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
@@ -335,9 +407,8 @@ void PairEntropy::calculate()
     for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
       vector<Vector> integrandDerivatives(nhist);
       for(unsigned k=0;k<nhist;++k){
-        double x=deltar*(k+0.5);
         if (gofr[k]>1.e-10) {
-          integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*x*x;
+          integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*vectorX2[k];
         }
       }
       // Integrate
@@ -348,9 +419,8 @@ void PairEntropy::calculate()
     // Construct virial integrand
     vector<Tensor> integrandVirial(nhist);
     for(unsigned j=0;j<nhist;++j){
-      double x=deltar*(j+0.5);
       if (gofr[j]>1.e-10) {
-        integrandVirial[j] = gofrVirial[j]*logGofr[j]*x*x;
+        integrandVirial[j] = gofrVirial[j]*logGofr[j]*vectorX2[j];
       }
     }
     // Integrate virial
@@ -360,8 +430,11 @@ void PairEntropy::calculate()
       // Construct virial integrand
       vector<double> integrandVirialVolume(nhist);
       for(unsigned j=0;j<nhist;j+=1) {
-        double x=deltar*(j+0.5);
-        integrandVirialVolume[j] = (-gofr[j]+1)*x*x;
+        if (doReferenceGofr) {
+           integrandVirialVolume[j] = (-gofr[j]+referenceGofr[j])*vectorX2[j];
+        } else {
+           integrandVirialVolume[j] = (-gofr[j]+1)*vectorX2[j];
+        }
       }
       // Integrate virial
       virial += -2*pi*density*integrate(integrandVirialVolume,deltar)*Tensor::identity();
@@ -420,8 +493,7 @@ void PairEntropy::outputGofr(vector<double> gofr) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("gofr.txt");
   for(unsigned i=0;i<gofr.size();++i){
-     double r=deltar*(i+0.5);
-     gofrOfile.printField("r",r).printField("gofr",gofr[i]).printField();
+     gofrOfile.printField("r",vectorX[i]).printField("gofr",gofr[i]).printField();
   }
   gofrOfile.close();
 }
@@ -430,8 +502,7 @@ void PairEntropy::outputIntegrand(vector<double> integrand) {
   PLMD::OFile gofrOfile;
   gofrOfile.open("integrand.txt");
   for(unsigned i=0;i<integrand.size();++i){
-     double r=deltar*(i+0.5);
-     gofrOfile.printField("r",r).printField("integrand",integrand[i]).printField();
+     gofrOfile.printField("r",vectorX[i]).printField("integrand",integrand[i]).printField();
   }
   gofrOfile.close();
 }
