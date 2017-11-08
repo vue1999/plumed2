@@ -355,7 +355,8 @@ void PairEntropy::calculate()
    if (density_given>0) density=density_given;
    else density=getNumberOfAtoms()/volume;
   // Normalize g(r)
-  double normConstantBase = 2*pi*getNumberOfAtoms()*density;
+  double TwoPiDensity = 2*pi*density;
+  double normConstantBase = TwoPiDensity*getNumberOfAtoms();
   for(unsigned j=0;j<nhist;++j){
     double normConstant = normConstantBase*vectorX2[j];
     gofr[j] /= normConstant;
@@ -401,7 +402,7 @@ void PairEntropy::calculate()
   // Output of integrands
   if (doOutputIntegrand && (getStep()%outputStride==0) && rank==0 ) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
-  pairEntropy = -2*pi*density*integrate(integrand,deltar);
+  pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
   if (!doNotCalculateDerivatives() ) {
     for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
@@ -412,7 +413,7 @@ void PairEntropy::calculate()
         }
       }
       // Integrate
-      deriv[j] = -2*pi*density*integrate(integrandDerivatives,deltar);
+      deriv[j] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
     }
     comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
     // Virial of positions
@@ -424,7 +425,7 @@ void PairEntropy::calculate()
       }
     }
     // Integrate virial
-    virial = -2*pi*density*integrate(integrandVirial,deltar);
+    virial = -TwoPiDensity*integrate(integrandVirial,deltar);
     // Virial of volume
     if (density_given<0) {
       // Construct virial integrand
@@ -437,7 +438,7 @@ void PairEntropy::calculate()
         }
       }
       // Integrate virial
-      virial += -2*pi*density*integrate(integrandVirialVolume,deltar)*Tensor::identity();
+      virial += -TwoPiDensity*integrate(integrandVirialVolume,deltar)*Tensor::identity();
       }
   }
   // Assign output quantities
