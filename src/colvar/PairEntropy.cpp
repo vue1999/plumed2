@@ -22,6 +22,7 @@
 #include "Colvar.h"
 #include "ActionRegister.h"
 #include "tools/NeighborList.h"
+#include "tools/NeighborListParallel.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
 #include "tools/IFile.h"
@@ -66,7 +67,11 @@ PAIRENTROPY ...
 class PairEntropy : public Colvar {
   bool pbc;
   bool serial;
-  NeighborList *nl;
+  // Neighbor list stuff
+  bool doneigh;
+  //NeighborList *nl;
+  NeighborListParallel *nl;
+  vector<AtomNumber> ga_lista; //,gb_lista;
   bool invalidateList;
   bool firsttime;
   // Output
@@ -121,7 +126,7 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
   keys.add("atoms","GROUPA","First list of atoms");
-  keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
+  //keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
@@ -138,9 +143,8 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
 
-  vector<AtomNumber> ga_lista,gb_lista;
   parseAtomList("GROUPA",ga_lista);
-  parseAtomList("GROUPB",gb_lista);
+  //parseAtomList("GROUPB",gb_lista);
 
   bool nopbc=!pbc;
   parseFlag("NOPBC",nopbc);
@@ -151,7 +155,7 @@ firsttime(true)
   parseFlag("PAIR",dopair);
 
 // neighbor list stuff
-  bool doneigh=false;
+  doneigh=false;
   double nl_cut=0.0;
   int nl_st=0;
   parseFlag("NLIST",doneigh);
@@ -168,36 +172,49 @@ firsttime(true)
   else log.printf("The g(r) will be normalized with a density N/V . \n");
 
   addValueWithDerivatives(); setNotPeriodic();
-  if(gb_lista.size()>0){
-    if(doneigh)  nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc(),nl_cut,nl_st);
-    else         nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc());
+
+  // Neighbor lists
+  if (doneigh) {
+    //if(gb_lista.size()>0){
+    //  if(doneigh)  nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc(),nl_cut,nl_st);
+    //  else         nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc());
+    //} else {
+    //if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
+    //nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
+    nl= new NeighborListParallel(ga_lista,pbc,getPbc(),comm,nl_cut,nl_st);
+    //else         nl= new NeighborList(ga_lista,pbc,getPbc());
+    //}
+ 
+    requestAtoms(nl->getFullAtomList());
+
+    /* 
+    log.printf("  between two groups of %u and %u atoms\n",static_cast<unsigned>(ga_lista.size()),static_cast<unsigned>(gb_lista.size()));
+    log.printf("  first group:\n");
+    for(unsigned int i=0;i<ga_lista.size();++i){
+     if ( (i+1) % 25 == 0 ) log.printf("  \n");
+     log.printf("  %d", ga_lista[i].serial());
+    }
+    log.printf("  \n  second group:\n");
+    for(unsigned int i=0;i<gb_lista.size();++i){
+     if ( (i+1) % 25 == 0 ) log.printf("  \n");
+     log.printf("  %d", gb_lista[i].serial());
+    }
+    log.printf("  \n");
+    */
+    if(pbc) log.printf("  using periodic boundary conditions\n");
+    else    log.printf("  without periodic boundary conditions\n");
+    if(dopair) log.printf("  with PAIR option\n");
+    if(doneigh){
+     log.printf("  using neighbor lists with\n");
+     log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
+    }
   } else {
-    if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
-    else         nl= new NeighborList(ga_lista,pbc,getPbc());
+    //std::vector<PLMD::AtomNumber> atomsToRequest;
+    //atomsToRequest.reserve ( ga_lista.size() + gb_lista.size() );
+    //atomsToRequest.insert (atomsToRequest.end(), ga_lista.begin(), ga_lista.end() );
+    //atomsToRequest.insert (atomsToRequest.end(), gb_lista.begin(), gb_lista.end() );
+    requestAtoms(ga_lista);
   }
-
-  requestAtoms(nl->getFullAtomList());
-
-  log.printf("  between two groups of %u and %u atoms\n",static_cast<unsigned>(ga_lista.size()),static_cast<unsigned>(gb_lista.size()));
-  log.printf("  first group:\n");
-  for(unsigned int i=0;i<ga_lista.size();++i){
-   if ( (i+1) % 25 == 0 ) log.printf("  \n");
-   log.printf("  %d", ga_lista[i].serial());
-  }
-  log.printf("  \n  second group:\n");
-  for(unsigned int i=0;i<gb_lista.size();++i){
-   if ( (i+1) % 25 == 0 ) log.printf("  \n");
-   log.printf("  %d", gb_lista[i].serial());
-  }
-  log.printf("  \n");
-  if(pbc) log.printf("  using periodic boundary conditions\n");
-  else    log.printf("  without periodic boundary conditions\n");
-  if(dopair) log.printf("  with PAIR option\n");
-  if(doneigh){
-   log.printf("  using neighbor lists with\n");
-   log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
-  }
-
 
   parse("MAXR",maxr);
   log.printf("Integration in the interval from 0. to %f nm. \n", maxr );
@@ -266,11 +283,11 @@ firsttime(true)
 }
 
 PairEntropy::~PairEntropy(){
-  delete nl;
+  if (doneigh) delete nl;
 }
 
 void PairEntropy::prepare(){
-  if(nl->getStride()>0){
+  if(doneigh && nl->getStride()>0){
     if(firsttime || (getStep()%nl->getStride()==0)){
       requestAtoms(nl->getFullAtomList());
       invalidateList=true;
@@ -280,7 +297,7 @@ void PairEntropy::prepare(){
       invalidateList=false;
       if(getExchangeStep()) error("Neighbor lists should be updated on exchange steps - choose a NL_STRIDE which divides the exchange stride!");
     }
-    if(getExchangeStep()) firsttime=true;
+    if(doneigh && getExchangeStep()) firsttime=true;
   }
 }
 
@@ -297,7 +314,7 @@ void PairEntropy::calculate()
   Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
   vector<Tensor> gofrVirial(nhist);
   // Setup neighbor list and parallelization
-  if(nl->getStride()>0 && invalidateList){
+  if(doneigh && nl->getStride()>0 && invalidateList){
     nl->update(getPositions());
   }
   unsigned stride=comm.Get_size();
@@ -309,38 +326,76 @@ void PairEntropy::calculate()
     stride=comm.Get_size();
     rank=comm.Get_rank();
   }
-  // Loop over neighbors
-  const unsigned nn=nl->size();
-  for(unsigned int i=rank;i<nn;i+=stride) {
-    double dfunc, d2;
-    Vector distance;
-    Vector distance_versor;
-    unsigned i0=nl->getClosePair(i).first;
-    unsigned i1=nl->getClosePair(i).second;
-    if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-    if(pbc){
-     distance=pbcDistance(getPosition(i0),getPosition(i1));
-    } else {
-     distance=delta(getPosition(i0),getPosition(i1));
+  if (doneigh) {
+    // Loop over neighbors
+    const unsigned nn=nl->size();
+    for(unsigned int i=rank;i<nn;i+=stride) {
+      double dfunc, d2;
+      Vector distance;
+      Vector distance_versor;
+      unsigned i0=nl->getClosePair(i).first;
+      unsigned i1=nl->getClosePair(i).second;
+      if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+      if(pbc){
+       distance=pbcDistance(getPosition(i0),getPosition(i1));
+      } else {
+       distance=delta(getPosition(i0),getPosition(i1));
+      }
+      if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+        double distanceModulo=std::sqrt(d2);
+        Vector distance_versor = distance / distanceModulo;
+        unsigned bin=std::floor(distanceModulo/deltar);
+        int minBin, maxBin; // These cannot be unsigned
+        // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+        minBin=bin - deltaBin;
+        if (minBin < 0) minBin=0;
+        if (minBin > (nhist-1)) minBin=nhist-1;
+        maxBin=bin +  deltaBin;
+        if (maxBin > (nhist-1)) maxBin=nhist-1;
+        for(int k=minBin;k<maxBin+1;k+=1) {
+          gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+          Vector value = dfunc * distance_versor;
+          gofrPrime[k][i0] += value;
+          gofrPrime[k][i1] -= value;
+          Tensor vv(value, distance);
+          gofrVirial[k] += vv;
+        }
+      }
     }
-    if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-      double distanceModulo=std::sqrt(d2);
-      Vector distance_versor = distance / distanceModulo;
-      unsigned bin=std::floor(distanceModulo/deltar);
-      int minBin, maxBin; // These cannot be unsigned
-      // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-      minBin=bin - deltaBin;
-      if (minBin < 0) minBin=0;
-      if (minBin > (nhist-1)) minBin=nhist-1;
-      maxBin=bin +  deltaBin;
-      if (maxBin > (nhist-1)) maxBin=nhist-1;
-      for(int k=minBin;k<maxBin+1;k+=1) {
-        gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
-        Vector value = dfunc * distance_versor;
-        gofrPrime[k][i0] += value;
-        gofrPrime[k][i1] -= value;
-        Tensor vv(value, distance);
-        gofrVirial[k] += vv;
+  } else {
+    for(unsigned int i=rank;i<(getNumberOfAtoms()-1);i+=stride) {
+      for(unsigned int j=i+1;j<getNumberOfAtoms();j+=1) {
+         double dfunc, d2;
+         Vector distance;
+         Vector distance_versor;
+         unsigned i0=i; 
+         unsigned i1=j; 
+         if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+         if(pbc){
+          distance=pbcDistance(getPosition(i0),getPosition(i1));
+         } else {
+          distance=delta(getPosition(i0),getPosition(i1));
+         }
+         if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+           double distanceModulo=std::sqrt(d2);
+           Vector distance_versor = distance / distanceModulo;
+           unsigned bin=std::floor(distanceModulo/deltar);
+           int minBin, maxBin; // These cannot be unsigned
+           // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+           minBin=bin - deltaBin;
+           if (minBin < 0) minBin=0;
+           if (minBin > (nhist-1)) minBin=nhist-1;
+           maxBin=bin +  deltaBin;
+           if (maxBin > (nhist-1)) maxBin=nhist-1;
+           for(int k=minBin;k<maxBin+1;k+=1) {
+             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+             Vector value = dfunc * distance_versor;
+             gofrPrime[k][i0] += value;
+             gofrPrime[k][i1] -= value;
+             Tensor vv(value, distance);
+             gofrVirial[k] += vv;
+           }
+         }
       }
     }
   }
