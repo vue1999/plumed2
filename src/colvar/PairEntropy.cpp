@@ -168,8 +168,8 @@ firsttime(true)
 
   density_given = -1;
   parse("DENSITY",density_given);
-  if (density_given>0) log.printf("The g(r) will be normalized with a density %f . \n", density_given);
-  else log.printf("The g(r) will be normalized with a density N/V . \n");
+  if (density_given>0) log.printf("  The g(r) will be normalized with a density %f . \n", density_given);
+  else log.printf("  The g(r) will be normalized with a density N/V . \n");
 
   addValueWithDerivatives(); setNotPeriodic();
 
@@ -181,7 +181,7 @@ firsttime(true)
     //} else {
     //if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
     //nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
-    nl= new NeighborListParallel(ga_lista,pbc,getPbc(),comm,nl_cut,nl_st);
+    nl= new NeighborListParallel(ga_lista,pbc,getPbc(),comm,log,nl_cut,nl_st);
     //else         nl= new NeighborList(ga_lista,pbc,getPbc());
     //}
  
@@ -217,11 +217,11 @@ firsttime(true)
   }
 
   parse("MAXR",maxr);
-  log.printf("Integration in the interval from 0. to %f nm. \n", maxr );
+  log.printf("  Integration in the interval from 0. to %f nm. \n", maxr );
   parse("NHIST",nhist);
-  log.printf("The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
+  log.printf("  The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
   parse("SIGMA",sigma);
-  log.printf("The pair distribution function is calculated with a Gaussian kernel with deviation %f . \n", sigma);
+  log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviation %f . \n", sigma);
   double rcut = maxr + 3*sigma;
   rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
   if(doneigh){
@@ -230,21 +230,21 @@ firsttime(true)
  
   doOutputGofr=false;
   parseFlag("OUTPUT_GOFR",doOutputGofr);
-  if (doOutputGofr) log.printf("The g(r) will be written to a file \n.");
+  if (doOutputGofr) log.printf("  The g(r) will be written to a file \n.");
   doOutputIntegrand=false;
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
-  if (doOutputIntegrand) log.printf("The integrand will be written to a file \n.");
+  if (doOutputIntegrand) log.printf("  The integrand will be written to a file \n.");
   outputStride=1;
   parse("OUTPUT_STRIDE",outputStride);
   if (outputStride!=1 && !doOutputGofr && !doOutputIntegrand) error("Cannot specify OUTPUT_STRIDE if OUTPUT_GOFR or OUTPUT_INTEGRAND not used");
   if (outputStride<1) error("The output stride specified with OUTPUT_STRIDE must be greater than or equal to one.");
-  if (outputStride>1) log.printf("The output stride to write g(r) or the integrand is %d \n", outputStride);
+  if (outputStride>1) log.printf("  The output stride to write g(r) or the integrand is %d \n", outputStride);
 
   doReferenceGofr=false;
   std::string referenceGofrFileName;
   parse("REFERENCE_GOFR_FNAME",referenceGofrFileName); 
   if (!referenceGofrFileName.empty() ) {
-    log.printf("Reading a reference g(r) from the file %s . \n", referenceGofrFileName.c_str() );
+    log.printf("  Reading a reference g(r) from the file %s . \n", referenceGofrFileName.c_str() );
     doReferenceGofr=true;
     IFile ifile; 
     ifile.link(*this);
@@ -260,7 +260,7 @@ firsttime(true)
   parseFlag("AVERAGE_GOFR",doAverageGofr);
   if (doAverageGofr) {
      iteration = 1;
-     log.printf("The g(r) will be averaged over all frames");
+     log.printf("  The g(r) will be averaged over all frames");
      avgGofr.resize(nhist);
   }
 
@@ -288,16 +288,16 @@ PairEntropy::~PairEntropy(){
 
 void PairEntropy::prepare(){
   if(doneigh && nl->getStride()>0){
+    requestAtoms(nl->getFullAtomList());
     if(firsttime || (getStep()%nl->getStride()==0)){
-      requestAtoms(nl->getFullAtomList());
       invalidateList=true;
       firsttime=false;
     }else{
-      requestAtoms(nl->getReducedAtomList());
+      //requestAtoms(nl->getReducedAtomList());
       invalidateList=false;
       if(getExchangeStep()) error("Neighbor lists should be updated on exchange steps - choose a NL_STRIDE which divides the exchange stride!");
     }
-    if(doneigh && getExchangeStep()) firsttime=true;
+    if(getExchangeStep()) firsttime=true;
   }
 }
 
@@ -314,7 +314,7 @@ void PairEntropy::calculate()
   Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
   vector<Tensor> gofrVirial(nhist);
   // Setup neighbor list and parallelization
-  if(doneigh && nl->getStride()>0 && invalidateList){
+  if(doneigh && invalidateList){
     nl->update(getPositions());
   }
   unsigned stride=comm.Get_size();
@@ -328,8 +328,9 @@ void PairEntropy::calculate()
   }
   if (doneigh) {
     // Loop over neighbors
+    // Each thread has its own neighbors so there's no need to parallelize here
     const unsigned nn=nl->size();
-    for(unsigned int i=rank;i<nn;i+=stride) {
+    for(unsigned int i=0;i<nn;i+=1) {
       double dfunc, d2;
       Vector distance;
       Vector distance_versor;

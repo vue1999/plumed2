@@ -25,6 +25,7 @@
 #include "Vector.h"
 #include "AtomNumber.h"
 #include "Communicator.h"
+#include "Log.h"
 
 #include <vector>
 
@@ -43,29 +44,27 @@ class NeighborListParallel
   std::vector<std::pair<unsigned,unsigned> > neighbors_;
   double distance_;
   unsigned stride_,nlist0_,nlist1_,nallpairs_,lastupdate_;
-/// Initialize the neighbor list with all possible pairs
-  void initialize();
 /// Return the pair of indexes in the positions array
 /// of the two atoms forming the i-th pair among all possible pairs
   std::pair<unsigned,unsigned> getIndexPair(unsigned i);
-/// Extract the list of atoms from the current list of close pairs
-  void setRequestList();
 /// Communicator
-  Communicator comm;
+  Communicator& mycomm;
+/// Log
+  Log& mylog;
 public:
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0,
                const std::vector<PLMD::AtomNumber>& list1,
-               const bool& do_pair, const bool& do_pbc, const PLMD::Pbc& pbc, const Communicator& cc,
-               const double& distance=1.0e+30, const unsigned& stride=0);
+               const bool& do_pair, const bool& do_pbc, const PLMD::Pbc& pbc, Communicator& cc,
+               Log& log, const double& distance=1.0e+30, const unsigned& stride=0);
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0, const bool& do_pbc,
-               const PLMD::Pbc& pbc, const Communicator& cc, const double& distance=1.0e+30,
+               const PLMD::Pbc& pbc, Communicator& cc, Log& log, const double& distance=1.0e+30,
                const unsigned& stride=0);
 /// Return the list of all atoms. These are needed to rebuild the neighbor list.
   std::vector<PLMD::AtomNumber>& getFullAtomList();
 /// Update the indexes in the neighbor list to match the
 /// ordering in the new positions array
 /// and return the new list of atoms that must be requested to the main code
-  std::vector<PLMD::AtomNumber>& getReducedAtomList();
+//  std::vector<PLMD::AtomNumber>& getReducedAtomList();
 /// Update the neighbor list and prepare the new
 /// list of atoms that will be requested to the main code
   void update(const std::vector<PLMD::Vector>& positions);
