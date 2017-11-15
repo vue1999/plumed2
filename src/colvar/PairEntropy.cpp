@@ -271,13 +271,13 @@ firsttime(true)
   invSqrt2piSigma = 1./sqrt2piSigma;
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
-  deltar=maxr/nhist;
+  deltar=maxr/(nhist-1.);
   if(deltar>sigma) error("Bin size too large! Increase NHIST");
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
   vectorX.resize(nhist);
   vectorX2.resize(nhist);
   for(unsigned i=0;i<nhist;++i){
-    vectorX[i]=deltar*(i+0.5);
+    vectorX[i]=deltar*i;
     vectorX2[i]=vectorX[i]*vectorX[i];
   }
 }
@@ -413,7 +413,7 @@ void PairEntropy::calculate()
   // Normalize g(r)
   double TwoPiDensity = 2*pi*density;
   double normConstantBase = TwoPiDensity*getNumberOfAtoms();
-  for(unsigned j=0;j<nhist;++j){
+  for(unsigned j=1;j<nhist;++j){
     double normConstant = normConstantBase*vectorX2[j];
     gofr[j] /= normConstant;
     gofrVirial[j] /= normConstant;
@@ -431,6 +431,13 @@ void PairEntropy::calculate()
   }
   // Output of gofr
   if (doOutputGofr && (getStep()%outputStride==0) && rank==0 ) outputGofr(gofr);
+  // Find where g(r) is different from zero
+  unsigned j=0;
+  unsigned nhist_min=0;
+  while (gofr[j]<1.e-10) {
+     nhist_min=j;
+     ++j;
+  }
   // Construct integrand
   vector<double> integrand(nhist);
   for(unsigned j=0;j<nhist;++j){
@@ -463,7 +470,7 @@ void PairEntropy::calculate()
   if (!doNotCalculateDerivatives() ) {
     for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
       vector<Vector> integrandDerivatives(nhist);
-      for(unsigned k=0;k<nhist;++k){
+      for(unsigned k=nhist_min;k<nhist;++k){
         if (gofr[k]>1.e-10) {
           integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*vectorX2[k];
         }
@@ -475,7 +482,7 @@ void PairEntropy::calculate()
     // Virial of positions
     // Construct virial integrand
     vector<Tensor> integrandVirial(nhist);
-    for(unsigned j=0;j<nhist;++j){
+    for(unsigned j=nhist_min;j<nhist;++j){
       if (gofr[j]>1.e-10) {
         integrandVirial[j] = gofrVirial[j]*logGofr[j]*vectorX2[j];
       }

@@ -69,21 +69,6 @@ vector<AtomNumber>& NeighborListParallel::getFullAtomList() {
   return fullatomlist_;
 }
 
-pair<unsigned,unsigned> NeighborListParallel::getIndexPair(unsigned ipair) {
-  pair<unsigned,unsigned> index;
-  if(twolists_ && do_pair_) {
-    index=pair<unsigned,unsigned>(ipair,ipair+nlist0_);
-  } else if (twolists_ && !do_pair_) {
-    index=pair<unsigned,unsigned>(ipair/nlist1_,ipair%nlist1_+nlist0_);
-  } else if (!twolists_) {
-    unsigned ii = nallpairs_-1-ipair;
-    unsigned  K = unsigned(floor((sqrt(double(8*ii+1))+1)/2));
-    unsigned jj = ii-K*(K-1)/2;
-    index=pair<unsigned,unsigned>(nlist0_-1-K,nlist0_-1-jj);
-  }
-  return index;
-}
-
 void NeighborListParallel::update(const vector<Vector>& positions) {
   neighbors_.clear();
   unsigned mpi_rank=mycomm.Get_rank();
@@ -91,20 +76,47 @@ void NeighborListParallel::update(const vector<Vector>& positions) {
   const double d2=distance_*distance_;
 // check if positions array has the correct length
   plumed_assert(positions.size()==fullatomlist_.size());
-// Parallelize
-  for(unsigned int i=mpi_rank; i<nallpairs_; i+=mpi_stride) {
-    pair<unsigned,unsigned> index=getIndexPair(i);
-    unsigned index0=index.first;
-    unsigned index1=index.second;
-    Vector distance;
-    if(do_pbc_) {
-      distance=pbc_->distance(positions[index0],positions[index1]);
-    } else {
-      distance=delta(positions[index0],positions[index1]);
+  if (!twolists_) {
+    for(unsigned int i=mpi_rank;i<(nlist0_-1);i+=mpi_stride) {
+       for(unsigned int j=i+1;j<nlist0_;j+=1) {
+          Vector distance;
+          if(do_pbc_) {
+            distance=pbc_->distance(positions[i],positions[j]);
+          } else {
+            distance=delta(positions[i],positions[j]);
+          }
+          double value=modulo2(distance);
+          if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
+       }
     }
-    double value=modulo2(distance);
-    if(value<=d2) {neighbors_.push_back(index);}
+  } else if(twolists_ && do_pair_) {
+    for(unsigned int i=0;i<nlist0_;i+=1) {
+       Vector distance;
+       if(do_pbc_) {
+         distance=pbc_->distance(positions[i],positions[nlist0_+i]);
+       } else {
+         distance=delta(positions[i],positions[nlist0_+i]);
+       }
+       double value=modulo2(distance);
+       if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,nlist0_+i));
+    }
+  } else if (twolists_ && !do_pair_) {
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
+       for(unsigned int j=0;j<nlist1_;j+=1) {
+          Vector distance;
+          if(do_pbc_) {
+            distance=pbc_->distance(positions[i],positions[nlist0_+j]);
+          } else {
+            distance=delta(positions[i],positions[nlist0_+j]);
+          }
+          double value=modulo2(distance);
+          if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,nlist0_+j));
+       }
+    }
   }
+  /*
+  for(unsigned int i=mpi_rank; i<nallpairs_; i+=mpi_stride) {
+  */
 }
 
 unsigned NeighborListParallel::getStride() const {

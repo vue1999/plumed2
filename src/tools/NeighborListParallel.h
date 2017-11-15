@@ -46,7 +46,7 @@ class NeighborListParallel
   unsigned stride_,nlist0_,nlist1_,nallpairs_,lastupdate_;
 /// Return the pair of indexes in the positions array
 /// of the two atoms forming the i-th pair among all possible pairs
-  std::pair<unsigned,unsigned> getIndexPair(unsigned i);
+  //std::pair<unsigned,unsigned> getIndexPair(unsigned i);
 /// Communicator
   Communicator& mycomm;
 /// Log
