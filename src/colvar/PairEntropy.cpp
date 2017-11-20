@@ -26,6 +26,7 @@
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
 #include "tools/IFile.h"
+#include "math.h"
 
 #include <string>
 
@@ -52,7 +53,7 @@ The following input tells plumed to calculate the pair entropy of atoms 1-250 wi
 \verbatim
 PAIRENTROPY ...
  LABEL=s2
- GROUPA=1-250
+ ATOMS=1-250
  MAXR=0.65
  SIGMA=0.025
  NHIST=100
@@ -71,7 +72,7 @@ class PairEntropy : public Colvar {
   bool doneigh;
   //NeighborList *nl;
   NeighborListParallel *nl;
-  vector<AtomNumber> ga_lista; //,gb_lista;
+  vector<AtomNumber> atoms_lista; //,gb_lista;
   bool invalidateList;
   bool firsttime;
   // Output
@@ -95,6 +96,7 @@ class PairEntropy : public Colvar {
   // Output gofr and integrand
   void outputGofr(vector<double> gofr);
   void outputIntegrand(vector<double> integrand);
+  mutable PLMD::OFile gofrOfile, integrandOfile;
   // Reference g(r)
   bool doReferenceGofr;
   std::vector<double> referenceGofr;
@@ -125,11 +127,10 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
-  keys.add("atoms","GROUPA","First list of atoms");
-  //keys.add("atoms","GROUPB","Second list of atoms (if empty, N*(N-1)/2 pairs in GROUPA are counted)");
-  keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
-  keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
-  keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
+  keys.add("atoms","ATOMS","List of atoms");
+  keys.add("compulsory","MAXR","1.","Maximum distance for the radial distribution function ");
+  keys.add("optional","NHIST","Number of bins in the rdf ");
+  keys.add("compulsory","SIGMA","0.01","Width of gaussians ");
   keys.add("optional","REFERENCE_GOFR_FNAME","the name of the file with the reference g(r)");
 }
 
@@ -143,8 +144,8 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
 
-  parseAtomList("GROUPA",ga_lista);
-  //parseAtomList("GROUPB",gb_lista);
+  //if(keywords.exists("GROUPA")) error("Keyword GROUPA is no longer used. Please use the keyword ATOMS");
+  parseAtomList("ATOMS",atoms_lista);
 
   bool nopbc=!pbc;
   parseFlag("NOPBC",nopbc);
@@ -175,32 +176,8 @@ firsttime(true)
 
   // Neighbor lists
   if (doneigh) {
-    //if(gb_lista.size()>0){
-    //  if(doneigh)  nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc(),nl_cut,nl_st);
-    //  else         nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc());
-    //} else {
-    //if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
-    //nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
-    nl= new NeighborListParallel(ga_lista,pbc,getPbc(),comm,log,nl_cut,nl_st);
-    //else         nl= new NeighborList(ga_lista,pbc,getPbc());
-    //}
- 
+    nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_st);
     requestAtoms(nl->getFullAtomList());
-
-    /* 
-    log.printf("  between two groups of %u and %u atoms\n",static_cast<unsigned>(ga_lista.size()),static_cast<unsigned>(gb_lista.size()));
-    log.printf("  first group:\n");
-    for(unsigned int i=0;i<ga_lista.size();++i){
-     if ( (i+1) % 25 == 0 ) log.printf("  \n");
-     log.printf("  %d", ga_lista[i].serial());
-    }
-    log.printf("  \n  second group:\n");
-    for(unsigned int i=0;i<gb_lista.size();++i){
-     if ( (i+1) % 25 == 0 ) log.printf("  \n");
-     log.printf("  %d", gb_lista[i].serial());
-    }
-    log.printf("  \n");
-    */
     if(pbc) log.printf("  using periodic boundary conditions\n");
     else    log.printf("  without periodic boundary conditions\n");
     if(dopair) log.printf("  with PAIR option\n");
@@ -209,17 +186,11 @@ firsttime(true)
      log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
     }
   } else {
-    //std::vector<PLMD::AtomNumber> atomsToRequest;
-    //atomsToRequest.reserve ( ga_lista.size() + gb_lista.size() );
-    //atomsToRequest.insert (atomsToRequest.end(), ga_lista.begin(), ga_lista.end() );
-    //atomsToRequest.insert (atomsToRequest.end(), gb_lista.begin(), gb_lista.end() );
-    requestAtoms(ga_lista);
+    requestAtoms(atoms_lista);
   }
 
   parse("MAXR",maxr);
   log.printf("  Integration in the interval from 0. to %f nm. \n", maxr );
-  parse("NHIST",nhist);
-  log.printf("  The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
   parse("SIGMA",sigma);
   log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviation %f . \n", sigma);
   double rcut = maxr + 3*sigma;
@@ -227,13 +198,24 @@ firsttime(true)
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
   }
+  nhist=ceil(maxr/sigma) + 1; // Default value
+  parse("NHIST",nhist);
+  log.printf("  The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
  
   doOutputGofr=false;
   parseFlag("OUTPUT_GOFR",doOutputGofr);
-  if (doOutputGofr) log.printf("  The g(r) will be written to a file \n.");
+  if (doOutputGofr) { 
+     log.printf("  The g(r) will be written to a file \n.");
+     gofrOfile.link(*this);
+     gofrOfile.open("gofr.txt");
+  }
   doOutputIntegrand=false;
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
-  if (doOutputIntegrand) log.printf("  The integrand will be written to a file \n.");
+  if (doOutputIntegrand) {
+     log.printf("  The integrand will be written to a file \n.");
+     integrandOfile.link(*this);
+     integrandOfile.open("integrand.txt");
+  }
   outputStride=1;
   parse("OUTPUT_STRIDE",outputStride);
   if (outputStride!=1 && !doOutputGofr && !doOutputIntegrand) error("Cannot specify OUTPUT_STRIDE if OUTPUT_GOFR or OUTPUT_INTEGRAND not used");
@@ -284,6 +266,8 @@ firsttime(true)
 
 PairEntropy::~PairEntropy(){
   if (doneigh) delete nl;
+  if (doOutputGofr) gofrOfile.close();
+  if (doOutputIntegrand) integrandOfile.close();
 }
 
 void PairEntropy::prepare(){
@@ -423,6 +407,8 @@ void PairEntropy::calculate()
   }
   // Average g(r)
   if (doAverageGofr) {
+     // Cannot calculate derivatives when using the average g(r)
+     if (!doNotCalculateDerivatives()) error("Cannot use the AVERAGE_GOFR keyword when biasing");
      for(unsigned i=0;i<nhist;++i){
         avgGofr[i] += (gofr[i]-avgGofr[i])/( (double) iteration);
         gofr[i] = avgGofr[i];
@@ -430,7 +416,7 @@ void PairEntropy::calculate()
      iteration += 1;
   }
   // Output of gofr
-  if (doOutputGofr && (getStep()%outputStride==0) && rank==0 ) outputGofr(gofr);
+  if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofr);
   // Find where g(r) is different from zero
   unsigned j=0;
   unsigned nhist_min=0;
@@ -463,7 +449,7 @@ void PairEntropy::calculate()
     }
   }
   // Output of integrands
-  if (doOutputIntegrand && (getStep()%outputStride==0) && rank==0 ) outputIntegrand(integrand);
+  if (doOutputIntegrand && (getStep()%outputStride==0)) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
   pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
@@ -554,21 +540,19 @@ Tensor PairEntropy::integrate(vector<Tensor> integrand, double delta)const{
 }
 
 void PairEntropy::outputGofr(vector<double> gofr) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open("gofr.txt");
   for(unsigned i=0;i<gofr.size();++i){
      gofrOfile.printField("r",vectorX[i]).printField("gofr",gofr[i]).printField();
   }
-  gofrOfile.close();
+  gofrOfile.printf("\n");
+  gofrOfile.printf("\n");
 }
 
 void PairEntropy::outputIntegrand(vector<double> integrand) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open("integrand.txt");
   for(unsigned i=0;i<integrand.size();++i){
-     gofrOfile.printField("r",vectorX[i]).printField("integrand",integrand[i]).printField();
+     integrandOfile.printField("r",vectorX[i]).printField("integrand",integrand[i]).printField();
   }
-  gofrOfile.close();
+  integrandOfile.printf("\n");
+  integrandOfile.printf("\n");
 }
 
 

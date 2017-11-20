@@ -299,6 +299,7 @@ void PairOrientationalEntropy::calculate()
   }
   // Loop over neighbors
   const unsigned nn=nl->size();
+  //log.printf("nn %d \n",nn);
   for(unsigned int i=rank;i<nn;i+=stride) {
     double dfunc, d2;
     Vector distance;
@@ -321,9 +322,9 @@ void PairOrientationalEntropy::calculate()
       unsigned atom1_mol2=i1+center_lista.size();
       unsigned atom2_mol2=i1+center_lista.size()+start_lista.size();
       //log.printf("Center1 %d Center2 %d atom1_mol2 %d atom1_mol2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1), getAbsoluteIndex(atom1_mol2), getAbsoluteIndex(atom2_mol2) );
-      Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      //Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
       //Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-      //Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
+      Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
       Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
       double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
       double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
