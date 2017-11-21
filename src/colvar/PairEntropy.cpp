@@ -118,14 +118,13 @@ PLUMED_REGISTER_ACTION(PairEntropy,"PAIRENTROPY")
 void PairEntropy::registerKeywords( Keywords& keys ){
   Colvar::registerKeywords(keys);
   keys.addFlag("SERIAL",false,"Perform the calculation in serial - for debug purpose");
-  keys.addFlag("PAIR",false,"Pair only 1st element of the 1st group with 1st element in the second, etc");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
-  keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
-  keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
+  keys.add("optional","NL_CUTOFF","The cutoff for the neighbor list");
+  keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list. If non specified or negative, it checks every step and rebuilds as needed.");
   keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
   keys.add("atoms","ATOMS","List of atoms");
   keys.add("compulsory","MAXR","1.","Maximum distance for the radial distribution function ");
@@ -144,27 +143,25 @@ firsttime(true)
 
   parseFlag("SERIAL",serial);
 
-  //if(keywords.exists("GROUPA")) error("Keyword GROUPA is no longer used. Please use the keyword ATOMS");
   parseAtomList("ATOMS",atoms_lista);
 
   bool nopbc=!pbc;
   parseFlag("NOPBC",nopbc);
   pbc=!nopbc;
-
-// pair stuff
-  bool dopair=false;
-  parseFlag("PAIR",dopair);
+  if(pbc) log.printf("  using periodic boundary conditions\n");
+  else    log.printf("  without periodic boundary conditions\n");
 
 // neighbor list stuff
   doneigh=false;
   double nl_cut=0.0;
-  int nl_st=0;
+  double nl_skin;
+  int nl_st=-1;
   parseFlag("NLIST",doneigh);
   if(doneigh){
    parse("NL_CUTOFF",nl_cut);
    if(nl_cut<=0.0) error("NL_CUTOFF should be explicitly specified and positive");
    parse("NL_STRIDE",nl_st);
-   if(nl_st<=0) error("NL_STRIDE should be explicitly specified and positive");
+   //if(nl_st<=0) error("NL_STRIDE should be explicitly specified and positive");
   }
 
   density_given = -1;
@@ -174,29 +171,15 @@ firsttime(true)
 
   addValueWithDerivatives(); setNotPeriodic();
 
-  // Neighbor lists
-  if (doneigh) {
-    nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_st);
-    requestAtoms(nl->getFullAtomList());
-    if(pbc) log.printf("  using periodic boundary conditions\n");
-    else    log.printf("  without periodic boundary conditions\n");
-    if(dopair) log.printf("  with PAIR option\n");
-    if(doneigh){
-     log.printf("  using neighbor lists with\n");
-     log.printf("  update every %d steps and cutoff %f\n",nl_st,nl_cut);
-    }
-  } else {
-    requestAtoms(atoms_lista);
-  }
-
   parse("MAXR",maxr);
-  log.printf("  Integration in the interval from 0. to %f nm. \n", maxr );
+  log.printf("  Integration in the interval from 0. to %f \n", maxr );
   parse("SIGMA",sigma);
-  log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviation %f . \n", sigma);
+  log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviation %f \n", sigma);
   double rcut = maxr + 3*sigma;
   rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
+    nl_skin=nl_cut-maxr;
   }
   nhist=ceil(maxr/sigma) + 1; // Default value
   parse("NHIST",nhist);
@@ -248,6 +231,22 @@ firsttime(true)
 
   checkRead();
 
+  // Neighbor lists
+  if (doneigh) {
+    nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_st,nl_skin);
+    requestAtoms(nl->getFullAtomList());
+    log.printf("  using neighbor lists with\n");
+    log.printf("  cutoff %f, and skin %f\n",nl_cut,nl_skin);
+    if(nl_st>=0){
+      log.printf("  update every %d steps\n",nl_st);
+    } else {
+      log.printf("  checking every step for dangerous builds and rebuilding as needed\n");
+    }
+  } else {
+    requestAtoms(atoms_lista);
+  }
+
+
   // Define heavily used expressions
   double sqrt2piSigma = std::sqrt(2*pi)*sigma;
   invSqrt2piSigma = 1./sqrt2piSigma;
@@ -265,7 +264,10 @@ firsttime(true)
 }
 
 PairEntropy::~PairEntropy(){
-  if (doneigh) delete nl;
+  if (doneigh) {
+     nl->printStats();
+     delete nl;
+  }
   if (doOutputGofr) gofrOfile.close();
   if (doOutputIntegrand) integrandOfile.close();
 }
@@ -273,15 +275,16 @@ PairEntropy::~PairEntropy(){
 void PairEntropy::prepare(){
   if(doneigh && nl->getStride()>0){
     requestAtoms(nl->getFullAtomList());
-    if(firsttime || (getStep()%nl->getStride()==0)){
+    if(firsttime) {
       invalidateList=true;
       firsttime=false;
-    }else{
-      //requestAtoms(nl->getReducedAtomList());
+    } else if ( (nl->getStride()>=0) &&  (getStep()%nl->getStride()==0) ){
+      invalidateList=true;
+    } else if ( (nl->getStride()<0) && !(nl->isListStillGood(getPositions())) ){
+      invalidateList=true;
+    } else {
       invalidateList=false;
-      if(getExchangeStep()) error("Neighbor lists should be updated on exchange steps - choose a NL_STRIDE which divides the exchange stride!");
     }
-    if(getExchangeStep()) firsttime=true;
   }
 }
 
@@ -464,7 +467,9 @@ void PairEntropy::calculate()
       // Integrate
       deriv[j] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
     }
-    comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+    if(!serial){
+      comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+    }
     // Virial of positions
     // Construct virial integrand
     vector<Tensor> integrandVirial(nhist);

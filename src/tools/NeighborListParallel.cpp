@@ -34,9 +34,10 @@ using namespace std;
 
 NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, const vector<AtomNumber>& list1,
                            const bool& do_pair, const bool& do_pbc, const Pbc& pbc, Communicator& cc, Log& log,
-                           const double& distance, const unsigned& stride): reduced(false),
+                           const double& distance, const int& stride, const double& skin): reduced(false),
   do_pair_(do_pair), do_pbc_(do_pbc), pbc_(&pbc),
-  distance_(distance), stride_(stride), mycomm(cc), mylog(log) 
+  distance_(distance), stride_(stride), mycomm(cc), mylog(log),
+  skin_(skin) 
 {
 // store full list of atoms needed
   fullatomlist_=list0;
@@ -51,22 +52,66 @@ NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, cons
     nallpairs_=nlist0_;
   }
   lastupdate_=0;
+  positions_old_.resize(fullatomlist_.size());
+  dangerousBuilds_=0;
+  firsttime_=true;
+  numberOfBuilds_=0;
+  avgTotalNeighbors_=0.;
+  maxLoadImbalance_=2.;
+  avgLoadImbalance_=0.;
 }
 
 NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, const bool& do_pbc,
                            const Pbc& pbc, Communicator& cc, Log& log, const double& distance,
-                           const unsigned& stride): reduced(false),
+                           const int& stride, const double& skin): reduced(false),
   do_pbc_(do_pbc), pbc_(&pbc),
-  distance_(distance), stride_(stride), mycomm(cc), mylog(log) {
+  distance_(distance), stride_(stride), mycomm(cc), mylog(log),
+  skin_(skin) 
+{
   fullatomlist_=list0;
   nlist0_=list0.size();
   twolists_=false;
   nallpairs_=nlist0_*(nlist0_-1)/2;
   lastupdate_=0;
+  positions_old_.resize(fullatomlist_.size());
+  dangerousBuilds_=0;
+  firsttime_=true;
+  numberOfBuilds_=0;
+  avgTotalNeighbors_=0.;
+  maxLoadImbalance_=2.;
+  avgLoadImbalance_=0.;
 }
 
 vector<AtomNumber>& NeighborListParallel::getFullAtomList() {
   return fullatomlist_;
+}
+
+bool NeighborListParallel::isListStillGood(const vector<Vector>& positions) {
+  bool flag=true;
+  plumed_assert(positions.size()==fullatomlist_.size());
+  for(unsigned int i=0;i<fullatomlist_.size();i++) {
+    Vector distance;
+    if(do_pbc_) {
+       distance=pbc_->distance(positions[i],positions_old_[i]);
+    } else {
+       distance=delta(positions[i],positions_old_[i]);
+    }
+    if (modulo(distance)>skin_) {
+       flag=false;
+       break;
+    }
+  }
+  return flag;
+}
+
+void NeighborListParallel::printStats() {
+  mylog.printf("Neighbor list statistics\n");
+  mylog.printf("Total # of neighbors = %f \n", avgTotalNeighbors_);
+  mylog.printf("Ave neighs/atom = %f \n", avgTotalNeighbors_ /(double) nlist0_);
+  mylog.printf("Neighbor list builds = %d \n",numberOfBuilds_);
+  mylog.printf("Dangerous builds = %d \n",dangerousBuilds_);
+  mylog.printf("Average load imbalance (min/max) = %f \n",avgLoadImbalance_);
+  mylog.printf("Maximum load imbalance (min/max) = %f \n",maxLoadImbalance_);
 }
 
 void NeighborListParallel::update(const vector<Vector>& positions) {
@@ -114,12 +159,38 @@ void NeighborListParallel::update(const vector<Vector>& positions) {
        }
     }
   }
-  /*
-  for(unsigned int i=mpi_rank; i<nallpairs_; i+=mpi_stride) {
-  */
+  gatherStats(positions);
+  // Store positions for checking
+  for(unsigned int i=0;i<fullatomlist_.size();i++) {
+     positions_old_[i]=positions[i];
+  }
 }
 
-unsigned NeighborListParallel::getStride() const {
+void NeighborListParallel::gatherStats(const vector<Vector>& positions) {
+  // Check if rebuilt was dangerous
+  if (!firsttime_ && !isListStillGood(positions)) {
+     dangerousBuilds_++;
+  }
+  firsttime_=false;
+  numberOfBuilds_++;
+  std::vector<unsigned> neighbors_ranks_(mycomm.Get_size());
+  unsigned neighNum = neighbors_.size();
+  mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
+  unsigned allNeighNum=0;
+  for(unsigned int i=0;i<mycomm.Get_size();i+=1) allNeighNum+=neighbors_ranks_[i];
+  allNeighNum = std::accumulate(neighbors_ranks_.begin(), neighbors_ranks_.end(), 0);
+  //for(unsigned int i=0;i<mpi_stride;i+=1) mylog.printf("core %d neighbors %d \n", i,neighbors_ranks_[i]);
+  avgTotalNeighbors_ += (allNeighNum-avgTotalNeighbors_)/numberOfBuilds_;
+  auto min_element_ = *std::min_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
+  auto max_element_ = *std::max_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
+  //mylog.printf("Value: Min %d max %d \n",min_element_,max_element_ );
+  double loadImbalance=min_element_ / (double) max_element_;
+  //mylog.printf("loadImbalance %f \n", loadImbalance);
+  if (maxLoadImbalance_>loadImbalance) maxLoadImbalance_=loadImbalance;
+  avgLoadImbalance_ += (loadImbalance-avgLoadImbalance_)/numberOfBuilds_;
+}
+
+int NeighborListParallel::getStride() const {
   return stride_;
 }
 

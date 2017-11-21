@@ -38,12 +38,16 @@ class Pbc;
 class NeighborListParallel
 {
   bool reduced;
-  bool do_pair_,do_pbc_,twolists_;
+  bool do_pair_,do_pbc_,twolists_,firsttime_;
   const PLMD::Pbc* pbc_;
   std::vector<PLMD::AtomNumber> fullatomlist_,requestlist_;
+  std::vector<PLMD::Vector> positions_old_;
   std::vector<std::pair<unsigned,unsigned> > neighbors_;
-  double distance_;
-  unsigned stride_,nlist0_,nlist1_,nallpairs_,lastupdate_;
+  double distance_, skin_;
+  int stride_;
+  unsigned nlist0_,nlist1_,nallpairs_,lastupdate_;
+  unsigned dangerousBuilds_, numberOfBuilds_;
+  double maxLoadImbalance_,avgLoadImbalance_, avgTotalNeighbors_;
 /// Return the pair of indexes in the positions array
 /// of the two atoms forming the i-th pair among all possible pairs
   //std::pair<unsigned,unsigned> getIndexPair(unsigned i);
@@ -55,12 +59,14 @@ public:
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0,
                const std::vector<PLMD::AtomNumber>& list1,
                const bool& do_pair, const bool& do_pbc, const PLMD::Pbc& pbc, Communicator& cc,
-               Log& log, const double& distance=1.0e+30, const unsigned& stride=0);
+               Log& log, const double& distance=1.0e+30, const int& stride=0, const double& skin=0.1);
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0, const bool& do_pbc,
                const PLMD::Pbc& pbc, Communicator& cc, Log& log, const double& distance=1.0e+30,
-               const unsigned& stride=0);
+               const int& stride=0, const double& skin=0.1);
 /// Return the list of all atoms. These are needed to rebuild the neighbor list.
   std::vector<PLMD::AtomNumber>& getFullAtomList();
+/// Check if the nieghbor list must be rebuilt
+  bool isListStillGood(const std::vector<Vector>& positions);
 /// Update the indexes in the neighbor list to match the
 /// ordering in the new positions array
 /// and return the new list of atoms that must be requested to the main code
@@ -69,7 +75,7 @@ public:
 /// list of atoms that will be requested to the main code
   void update(const std::vector<PLMD::Vector>& positions);
 /// Get the update stride of the neighbor list
-  unsigned getStride() const;
+  int getStride() const;
 /// Get the last step in which the neighbor list was updated
   unsigned getLastUpdate() const;
 /// Set the step of the last update
@@ -81,6 +87,11 @@ public:
 /// Get the list of neighbors of the i-th atom
   std::vector<unsigned> getNeighbors(unsigned i);
   ~NeighborListParallel() {}
+/// Print statistics of neighbor list
+  void printStats();
+/// Gather statistics of neighbor list
+  void gatherStats(const std::vector<PLMD::Vector>& positions);
+
 };
 
 }
