@@ -300,10 +300,7 @@ void PairEntropy::calculate()
   vector<double> logGofr(nhist);
   Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
   vector<Tensor> gofrVirial(nhist);
-  // Setup neighbor list and parallelization
-  if(doneigh && invalidateList){
-    nl->update(getPositions());
-  }
+  // Setup parallelization
   unsigned stride=comm.Get_size();
   unsigned rank=comm.Get_rank();
   if(serial){
@@ -314,6 +311,9 @@ void PairEntropy::calculate()
     rank=comm.Get_rank();
   }
   if (doneigh) {
+    if(invalidateList){
+      nl->update(getPositions());
+    }
     // Loop over neighbors
     // Each thread has its own neighbors so there's no need to parallelize here
     const unsigned nn=nl->size();

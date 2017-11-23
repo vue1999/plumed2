@@ -178,7 +178,6 @@ void NeighborListParallel::gatherStats(const vector<Vector>& positions) {
   mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
   unsigned allNeighNum=0;
   for(unsigned int i=0;i<mycomm.Get_size();i+=1) allNeighNum+=neighbors_ranks_[i];
-  allNeighNum = std::accumulate(neighbors_ranks_.begin(), neighbors_ranks_.end(), 0);
   //for(unsigned int i=0;i<mpi_stride;i+=1) mylog.printf("core %d neighbors %d \n", i,neighbors_ranks_[i]);
   avgTotalNeighbors_ += (allNeighNum-avgTotalNeighbors_)/numberOfBuilds_;
   auto min_element_ = *std::min_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
