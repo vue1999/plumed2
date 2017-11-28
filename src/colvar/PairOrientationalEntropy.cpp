@@ -66,26 +66,27 @@ PAIRENTROPY ...
 class PairOrientationalEntropy : public Colvar {
   bool pbc, serial, invalidateList, firsttime, doneigh;
   NeighborListParallel *nl;
-  vector<AtomNumber> center_lista,start_lista,end_lista,origin_lista;
+  vector<AtomNumber> center_lista,start_lista,end_lista;
   std::vector<PLMD::AtomNumber> atomsToRequest;
   double maxr;
   vector<int> nhist_;
   vector<double> sigma_;
   double rcut2;
-  double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
+  double invTwoPiSigma1Sigma2, sigma1Sqr, sigma2Sqr, twoSigma1Sqr,twoSigma2Sqr;
   double deltar, deltaAngle, deltaCosAngle;
   unsigned deltaBin, deltaBinAngle;
   // Integration routines
   double integrate(Matrix<double> integrand, vector<double> delta)const;
+  Vector integrate(Matrix<Vector> integrand, vector<double> delta)const;
+  Tensor integrate(Matrix<Tensor> integrand, vector<double> delta)const;
   //double integrate(Matrix<double> integrand, vector<double> x1, vector<double> x2)const;
   double integrate(vector<double> integrand, double delta)const;
   Vector integrate(vector<Vector> integrand, double delta)const;
   Tensor integrate(vector<Tensor> integrand, double delta)const;
   vector<double> integrateMarginal(Matrix<double> integrand, double delta, unsigned dim)const;
-  vector<double> x1;
-  vector<double> x2;
+  vector<double> x1, x2, x1sqr, x2sqr;
   // Kernel to calculate g(r)
-  double kernel(vector<double> distance, double&der)const;
+  double kernel(vector<double> distance, vector<double>&der)const;
   // Output gofr and integrand
   void outputGofr(Matrix<double> gofr, const char* fileName);
   void outputIntegrand(vector<double> integrand);
@@ -103,6 +104,8 @@ public:
   virtual void calculate();
   virtual void prepare();
   static void registerKeywords( Keywords& keys );
+private:
+  bool insideEllipse(int i,int j,unsigned bini, unsigned binj, unsigned iaxis, unsigned jaxis);
 };
 
 PLUMED_REGISTER_ACTION(PairOrientationalEntropy,"PAIR_ORIENTATIONAL_ENTROPY")
@@ -122,7 +125,7 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.add("atoms","START","Start point of vector defining orientation");
   keys.add("atoms","END","End point of vector defining orientation");
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
-  keys.add("compulsory","NHIST","1","Number of bins in the rdf ");
+  keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
 }
 
@@ -171,16 +174,18 @@ firsttime(true)
   if(sigma_.size() != 2) error("SIGMA keyword takes two input values");
   log.printf("The pair distribution function is calculated with a Gaussian kernel with deviations %f and %f \n", sigma_[0], sigma_[1]);
   double rcut = maxr + 3*sigma_[0];
-  rcut2 = (maxr + 3*sigma_[0])*(maxr + 3*sigma_[0]);  // 3*sigma is hard coded
+  rcut2 = (maxr + 2*sigma_[0])*(maxr + 2*sigma_[0]);  // 2*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
     nl_skin=nl_cut-maxr;
   }
 
-  nhist_.resize(2);
-  nhist_[0]=ceil(maxr/sigma_[0]) + 1; // Default value
-  nhist_[1]=ceil(2./sigma_[1]) + 1; // Default value
   parseVector("NHIST",nhist_);
+  if (nhist_.size()<1) {
+     nhist_.resize(2);
+     nhist_[0]=ceil(maxr/sigma_[0]) + 1; // Default value
+     nhist_[1]=ceil(2./sigma_[1]) + 1; // Default value
+  }
   if(nhist_.size() != 2) error("NHIST keyword takes two input values");
   log.printf("The interval is partitioned in %u equal parts in r and %u equal parts in theta. The integration is performed with the trapezoid rule. \n", nhist_[0], nhist_[1] );
 
@@ -228,24 +233,27 @@ firsttime(true)
   requestAtoms(atomsToRequest);
 
   // Define heavily used expressions
-  double sqrt2piSigma = std::sqrt(2*pi)*sigma_[0];
-  invSqrt2piSigma = 1./sqrt2piSigma;
-  sigmaSqr2 = 2.*sigma_[0]*sigma_[0];
-  sigmaSqr = sigma_[0]*sigma_[0];
+  invTwoPiSigma1Sigma2 = (1./(2.*pi*sigma_[0]*sigma_[1]));
+  sigma1Sqr = sigma_[0]*sigma_[0];
+  sigma2Sqr = sigma_[1]*sigma_[1];
+  twoSigma1Sqr = 2*sigma_[0]*sigma_[0];
+  twoSigma2Sqr = 2*sigma_[1]*sigma_[1];
   deltar=maxr/(nhist_[0]-1);
   deltaCosAngle=2./(nhist_[1]-1);
-  deltaBin = std::floor(3*sigma_[0]/deltar); // 3*sigma is hard coded
-  deltaBinAngle = std::floor(3*sigma_[1]/deltaCosAngle); // 3*sigma is hard coded
+  deltaBin = std::floor(2*sigma_[0]/deltar); // 2*sigma is hard coded
+  deltaBinAngle = std::floor(2*sigma_[1]/deltaCosAngle); // 2*sigma is hard coded
 
   x1.resize(nhist_[0]);
+  x1sqr.resize(nhist_[0]);
   x2.resize(nhist_[1]);
-  for(unsigned j=0;j<nhist_[0];++j){
-     x1[j]=deltar*j;
-     //x1[j]=deltar*(j+0.5);
+  x2sqr.resize(nhist_[1]);
+  for(unsigned i=0;i<nhist_[0];++i){
+     x1[i]=deltar*i;
+     x1sqr[i]=x1[i]*x1[i];
   }
-  for(unsigned j=0;j<nhist_[1];++j){
-     //double theta=(pi/nhist_[1])*(j+0.5);
-     x2[j]=-1+deltaCosAngle*j;
+  for(unsigned i=0;i<nhist_[1];++i){
+     x2[i]=-1+deltaCosAngle*i;
+     x2sqr[i]=x2[i]*x2[i];
   }
 }
 
@@ -258,7 +266,6 @@ PairOrientationalEntropy::~PairOrientationalEntropy(){
 
 void PairOrientationalEntropy::prepare(){
   if(doneigh && nl->getStride()>0){
-    requestAtoms(nl->getFullAtomList());
     if(firsttime) {
       invalidateList=true;
       firsttime=false;
@@ -275,12 +282,30 @@ void PairOrientationalEntropy::prepare(){
 // calculator
 void PairOrientationalEntropy::calculate()
 {
+  clock_t begin_time = clock();
   // Define output quantities
   double pairEntropy;
   vector<Vector> deriv(getNumberOfAtoms());
   Tensor virial;
   // Define intermediate quantities
   Matrix<double> gofr(nhist_[0],nhist_[1]);
+  //vector< vector< vector<Vector> > > gofrPrime(getNumberOfAtoms(), Matrix<Vector>(nhist_[0],nhist_[1]) );
+  //vector<vector<vector<Vector> > > gofrPrime(getNumberOfAtoms(),vector<vector<Vector> >(nhist_[1],vector <Vector>(nhist_[0])));
+  //Matrix<Vector> gofrPrimeOneAtom(nhist_[0],nhist_[1]);
+  //vector<Matrix<Vector>> gofrPrime(getNumberOfAtoms(), gofrPrimeOneAtom);
+  //vector<Matrix<Vector>> gofrPrime(getNumberOfAtoms(), gofrPrimeOneAtom);
+  vector<Vector> gofrPrime(nhist_[0]*nhist_[1]*getNumberOfAtoms());
+  //vector<vector<vector<Vector> > > gofrPrime(nhist_[0],vector<vector<Vector> >(nhist_[1],vector <Vector>(getNumberOfAtoms())));
+  //vector<vector<vector<Vector> > > gofrPrime(getNumberOfAtoms(),vector<vector<Vector> >(nhist_[1],vector <Vector>(nhist_[0])));
+  Matrix<Tensor> gofrVirial(nhist_[0],nhist_[1]);
+  // Calculate volume and density
+  double volume=getBox().determinant();
+  double density=center_lista.size()/volume;
+  // Normalization of g(r)
+  double normConstantBase = 2*pi*center_lista.size()*density;
+  // Take into account "volume" of angles
+  double volumeOfAngles = 2.;
+  normConstantBase /= volumeOfAngles;
   // Setup parallelization
   unsigned stride=comm.Get_size();
   unsigned rank=comm.Get_rank();
@@ -293,86 +318,111 @@ void PairOrientationalEntropy::calculate()
   }
   if (doneigh) {
     if(invalidateList){
-      vector<Vector> centerPositions(getPositions().begin(),getPositions().begin() + center_lista.size());;
+      vector<Vector> centerPositions(getPositions().begin(),getPositions().begin() + center_lista.size());
       nl->update(centerPositions);
     }
     // Loop over neighbors
     const unsigned nn=nl->size();
     //log.printf("nn %d \n",nn);
-    for(unsigned int i=rank;i<nn;i+=stride) {
-      double dfunc, d2;
-      Vector distance;
-      Vector distance_versor;
+    for(unsigned int i=0;i<nn;i+=1) {
+       double d2;
+       vector<double> dfunc(2);
+       Vector distance;
+       Vector distance_versor;
       unsigned i0=nl->getClosePair(i).first;
       unsigned i1=nl->getClosePair(i).second;
-      if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-      //log.printf("Center1 %d Center2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1) );
-      if(pbc){
-       distance=pbcDistance(getPosition(i0),getPosition(i1));
-      } else {
-       distance=delta(getPosition(i0),getPosition(i1));
-      }
-      if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-        double distanceModulo=std::sqrt(d2);
-        Vector distance_versor = distance / distanceModulo;
-        unsigned bin=std::floor(distanceModulo/deltar);
-        unsigned atom1_mol1=i0+center_lista.size();
-        unsigned atom2_mol1=i0+center_lista.size()+start_lista.size();
-        unsigned atom1_mol2=i1+center_lista.size();
-        unsigned atom2_mol2=i1+center_lista.size()+start_lista.size();
-        //log.printf("Center1 %d Center2 %d atom1_mol2 %d atom1_mol2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1), getAbsoluteIndex(atom1_mol2), getAbsoluteIndex(atom2_mol2) );
-        Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
-        //Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-        //Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
-        Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-        double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
-        double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
-        double inv_v1=1./norm_v1;
-        double inv_v2=1./norm_v2;
-        double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-        double angle=acos(cosAngle);
-        //log.printf("Angle %f radians %f degrees \n", angle, angle*180./pi);
-        unsigned binAngle=std::floor((cosAngle+1.)/deltaCosAngle);
-        int minBin, maxBin; // These cannot be unsigned
-        // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-        minBin=bin - deltaBin;
-        if (minBin < 0) minBin=0;
-        if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
-        maxBin=bin +  deltaBin;
-        if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
-        int minBinAngle, maxBinAngle; // These cannot be unsigned
-        // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
-        minBinAngle=binAngle - deltaBinAngle;
-        maxBinAngle=binAngle +  deltaBinAngle;
-        //log.printf("minBinAngle %d maxBinAngle %d binAngle %d deltaBinAngle %d \n",minBinAngle,maxBinAngle,binAngle,deltaBinAngle);
-        for(int k=minBin;k<maxBin+1;k+=1) {
-          double x=deltar*k;
-          for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-             // Include periodic effects
-             int h;
-             if (l<0) {
-                h=-l;
-             } else if (l>(nhist_[1]-1)) {
-                h=2*nhist_[1]-l-2;
-             } else {
-                h=l;
-             }
-             double theta=-1+deltaCosAngle*l;
-             //log.printf("l %d h %d theta %f cosAngle %f \n",l,h,theta,cosAngle);
-             vector<double> pos(2);
-             pos[0]=x-distanceModulo;
-             pos[1]=theta-cosAngle;
-             if (l==(nhist_[1]-1)) gofr[k][h] += 2*kernel(pos, dfunc);
-             else if (l==0) gofr[k][h] += 2*kernel(pos, dfunc);
-             else gofr[k][h] += kernel(pos, dfunc);
-          }
-        }
-      }
-    }
+       if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+       if(pbc){
+        distance=pbcDistance(getPosition(i0),getPosition(i1));
+       } else {
+        distance=delta(getPosition(i0),getPosition(i1));
+       }
+       if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+         double distanceModulo=std::sqrt(d2);
+         Vector distance_versor = distance / distanceModulo;
+         unsigned bin=std::floor(distanceModulo/deltar);
+         unsigned atom1_mol1=i0+center_lista.size();
+         unsigned atom2_mol1=i0+center_lista.size()+start_lista.size();
+         unsigned atom1_mol2=i1+center_lista.size();
+         unsigned atom2_mol2=i1+center_lista.size()+start_lista.size();
+         //log.printf("Center1 %d Center2 %d atom1_mol2 %d atom1_mol2 %d \n", getAbsoluteIndex(i0), getAbsoluteIndex(i1), getAbsoluteIndex(atom1_mol2), getAbsoluteIndex(atom2_mol2) );
+         Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+         //Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+         //Vector mol_vector1=pbcDistance(getPosition(i0),getPosition(i1));
+         Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+         double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
+         double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
+         double inv_v1=1./norm_v1;
+         double inv_v2=1./norm_v2;
+         double inv_v1_sqr=inv_v1*inv_v1;
+         double inv_v2_sqr=inv_v2*inv_v2;
+         double inv_v1_inv_v2=inv_v1*inv_v2;
+         double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
+         //double angle=acos(cosAngle);
+         //log.printf("Angle %f radians %f degrees \n", angle, angle*180./pi);
+         unsigned binAngle=std::floor((cosAngle+1.)/deltaCosAngle);
+         int minBin, maxBin; // These cannot be unsigned
+         // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+         minBin=bin - deltaBin;
+         if (minBin < 0) minBin=0;
+         if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
+         maxBin=bin +  deltaBin;
+         if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
+         int minBinAngle, maxBinAngle; // These cannot be unsigned
+         // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
+         minBinAngle=binAngle - deltaBinAngle;
+         maxBinAngle=binAngle +  deltaBinAngle;
+         //log.printf("minBinAngle %d maxBinAngle %d binAngle %d deltaBinAngle %d \n",minBinAngle,maxBinAngle,binAngle,deltaBinAngle);
+         for(int k=minBin;k<maxBin+1;k+=1) {
+           double normConstant=normConstantBase*x1sqr[k];
+           for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
+              double theta=-1+deltaCosAngle*l;
+              vector<double> pos(2);
+              pos[0]=x1[k]-distanceModulo;
+              pos[1]=theta-cosAngle;
+              // Include periodic effects
+              int h;
+              if (l<0) {
+                 h=-l;
+              } else if (l>(nhist_[1]-1)) {
+                 h=2*nhist_[1]-l-2;
+              } else {
+                 h=l;
+              }
+              Vector value1;
+              Vector value2_mol1;
+              Vector value2_mol2;
+              if (l==(nhist_[1]-1) || l==0) {
+                 gofr[k][h] += 2*kernel(pos, dfunc)/normConstant;
+                 value1 = 2*dfunc[0]*distance_versor/normConstant;
+                 value2_mol1 = 2*dfunc[1]*(mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr)/normConstant;
+                 value2_mol2 = 2*dfunc[1]*(mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr)/normConstant;
+              } else {
+                 gofr[k][h] += kernel(pos, dfunc)/normConstant;
+                 value1 = dfunc[0]*distance_versor/normConstant;
+                 value2_mol1 = dfunc[1]*(mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr)/normConstant;
+                 value2_mol2 = dfunc[1]*(mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr)/normConstant;
+              }
+              gofrPrime[i0*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value1;
+              gofrPrime[i1*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value1;
+              gofrPrime[atom1_mol1*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value2_mol1;
+              gofrPrime[atom2_mol1*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value2_mol1;
+              gofrPrime[atom1_mol2*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value2_mol2;
+              gofrPrime[atom2_mol2*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value2_mol2;
+              Tensor vv1(value1, distance);
+              Tensor vv2_mol1(value2_mol1, mol_vector1);
+              Tensor vv2_mol2(value2_mol2, mol_vector2);
+              gofrVirial[k][h] += vv1+vv2_mol1+vv2_mol2;
+           }
+         }
+       }
+     }
   } else {
+    //log.printf("rank %d stride %d \n", rank, stride);
     for(unsigned int i=rank;i<(center_lista.size()-1);i+=stride) {
       for(unsigned int j=i+1;j<center_lista.size();j+=1) {
-        double dfunc, d2;
+        double d2;
+        vector<double> dfunc(2);
         Vector distance;
         Vector distance_versor;
         if(getAbsoluteIndex(i)==getAbsoluteIndex(j)) continue;
@@ -398,8 +448,11 @@ void PairOrientationalEntropy::calculate()
           double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
           double inv_v1=1./norm_v1;
           double inv_v2=1./norm_v2;
+          double inv_v1_sqr=inv_v1*inv_v1;
+          double inv_v2_sqr=inv_v2*inv_v2;
+          double inv_v1_inv_v2=inv_v1*inv_v2;
           double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-          double angle=acos(cosAngle);
+          //double angle=acos(cosAngle);
           //log.printf("Angle %f radians %f degrees \n", angle, angle*180./pi);
           unsigned binAngle=std::floor((cosAngle+1.)/deltaCosAngle);
           int minBin, maxBin; // These cannot be unsigned
@@ -415,8 +468,12 @@ void PairOrientationalEntropy::calculate()
           maxBinAngle=binAngle +  deltaBinAngle;
           //log.printf("minBinAngle %d maxBinAngle %d binAngle %d deltaBinAngle %d \n",minBinAngle,maxBinAngle,binAngle,deltaBinAngle);
           for(int k=minBin;k<maxBin+1;k+=1) {
-            double x=deltar*k;
+            double normConstant=normConstantBase*x1sqr[k];
             for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
+               double theta=-1+deltaCosAngle*l;
+               vector<double> pos(2);
+               pos[0]=x1[k]-distanceModulo;
+               pos[1]=theta-cosAngle;
                // Include periodic effects
                int h;
                if (l<0) {
@@ -426,47 +483,74 @@ void PairOrientationalEntropy::calculate()
                } else {
                   h=l;
                }
-               double theta=-1+deltaCosAngle*l;
-               //log.printf("l %d h %d theta %f cosAngle %f \n",l,h,theta,cosAngle);
-               vector<double> pos(2);
-               pos[0]=x-distanceModulo;
-               pos[1]=theta-cosAngle;
-               if (l==(nhist_[1]-1)) gofr[k][h] += 2*kernel(pos, dfunc);
-               else if (l==0) gofr[k][h] += 2*kernel(pos, dfunc);
-               else gofr[k][h] += kernel(pos, dfunc);
+               Vector value1;
+               Vector value2_mol1;
+               Vector value2_mol2;
+               if (l==(nhist_[1]-1) || l==0) {
+                  gofr[k][h] += 2*kernel(pos, dfunc)/normConstant;
+                  value1 = 2*dfunc[0]*distance_versor/normConstant;
+                  value2_mol1 = 2*dfunc[1]*(mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr)/normConstant;
+                  value2_mol2 = 2*dfunc[1]*(mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr)/normConstant;
+               } else {
+                  gofr[k][h] += kernel(pos, dfunc)/normConstant;
+                  value1 = dfunc[0]*distance_versor/normConstant;
+                  value2_mol1 = dfunc[1]*(mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr)/normConstant;
+                  value2_mol2 = dfunc[1]*(mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr)/normConstant;
+               }
+               /*
+               gofrPrime[k][h][i] += value1;
+               gofrPrime[k][h][j] -= value1;
+               gofrPrime[k][h][atom1_mol1] += value2_mol1;
+               gofrPrime[k][h][atom2_mol1] -= value2_mol1;
+               gofrPrime[k][h][atom1_mol2] += value2_mol2;
+               gofrPrime[k][h][atom2_mol2] -= value2_mol2; 
+               */
+               gofrPrime[i*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value1;
+               gofrPrime[j*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value1;
+               gofrPrime[atom1_mol1*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value2_mol1;
+               gofrPrime[atom2_mol1*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value2_mol1;
+               gofrPrime[atom1_mol2*nhist_[0]*nhist_[1]+h*nhist_[0]+k] += value2_mol2;
+               gofrPrime[atom2_mol2*nhist_[0]*nhist_[1]+h*nhist_[0]+k] -= value2_mol2;
+               Tensor vv1(value1, distance);
+               Tensor vv2_mol1(value2_mol1, mol_vector1);
+               Tensor vv2_mol2(value2_mol2, mol_vector2);
+               gofrVirial[k][h] += vv1+vv2_mol1+vv2_mol2;
             }
           }
         }
       }
     }
   }
+  std::cout << "Main loop: " << float( clock () - begin_time ) << "\n";
+  begin_time = clock();
   if(!serial){
     comm.Sum(&gofr[0][0],nhist_[0]*nhist_[1]);
+    //comm.Sum(&gofrPrime[0],nhist_[0]*nhist_[1]*getNumberOfAtoms());
+    comm.Sum(&gofrVirial[0][0],nhist_[0]*nhist_[1]);
   }
-  vector<double> delta(2);
-  delta[0]=deltar;
-  delta[1]=deltaCosAngle;
-  //log.printf("Integral of gaussians is %f \n", integrate(gofr,delta));
-  // Calculate volume and density
-  double volume=getBox().determinant();
-  double density=center_lista.size()/volume;
-  // Normalize g(r)
-  double normConstantBase;
-  if (origin_lista.size()>0) {
-     normConstantBase = 4*pi*density;
-  } else {
-     normConstantBase = 2*pi*center_lista.size()*density;
+  std::cout << "Communication: " <<  float( clock () - begin_time ) << "\n";
+  begin_time = clock();
+  /*
+  vector<double> normConstant(nhist_[0]);
+  for(unsigned i=1;i<nhist_[0];++i){ // Starts from 1, x=0 produces a divergence
+    normConstant[i] = normConstantBase*x1sqr[i];
   }
-  // Take into account "volume" of angles
-  double volumeOfAngles = 2.;
-  normConstantBase /= volumeOfAngles;
-  for(unsigned j=1;j<nhist_[0];++j){ // Starts from 1, x=0 produces a divergence
-    double x=deltar*j;
-    for(unsigned k=0;k<nhist_[1];++k){
-       double normConstant = normConstantBase*x*x;
-       gofr[j][k] /= normConstant;
+  for(unsigned i=1;i<nhist_[0];++i){ // Starts from 1, x=0 produces a divergence
+     for(unsigned j=0;j<nhist_[1];++j){
+       gofr[i][j] /= normConstant[i];
+       gofrVirial[i][j] /= normConstant[i];
     }
   }
+  for(unsigned k=0;k<getNumberOfAtoms();k++){
+     for(unsigned j=0;j<nhist_[1];++j){
+        for(unsigned i=1;i<nhist_[0];++i){ // Starts from 1, x=0 produces a divergence
+          gofrPrime[k*nhist_[0]*nhist_[1]+j*nhist_[0]+i] /= normConstant[i];
+        }
+     }
+  }
+  std::cout << "Normalization: " << float( clock () - begin_time ) << "\n";
+  //begin_time = clock();
+  */
   if (doAverageGofr) {
      for(unsigned i=0;i<nhist_[0];++i){
         for(unsigned j=0;j<nhist_[1];++j){
@@ -478,68 +562,77 @@ void PairOrientationalEntropy::calculate()
   }
   // Output of gofr
   if (doOutputGofr && (getStep()%outputStride==0) && rank==0) outputGofr(gofr,"gofr.txt");
-  /*
-  vector<double> gofrMarginalR(nhist_[0]);
-  gofrMarginalR=integrateMarginal(gofr,deltaCosAngle,1);
-  for(unsigned i=0;i<nhist_[0];++i){
-     gofrMarginalR[i] /= volumeOfAngles;
-  }
-  if (doOutputGofr && (getStep()%outputStride==0) && rank==0) {
-     output1Dfunction(gofrMarginalR, x1, "marginal.txt");
-  }
-  Matrix<double> ConditionalDistr(nhist_[0], nhist_[1]);
-  Matrix<double> integrand(nhist_[0], nhist_[1]);
+  // Construct integrand
+  Matrix<double> integrand(nhist_[0],nhist_[1]);
+  Matrix<double> logGofr(nhist_[0],nhist_[1]);
   for(unsigned i=0;i<nhist_[0];++i){
      for(unsigned j=0;j<nhist_[1];++j){
-        // The 1.e-10 might seem low but leads to a smooth behavior
-        if (gofrMarginalR[i]>1.e-10) ConditionalDistr[i][j] = gofr[i][j]/gofrMarginalR[i];
-        if (ConditionalDistr[i][j]> 1.e-10) integrand[i][j] = ConditionalDistr[i][j]*std::log(ConditionalDistr[i][j]);
-        else integrand[i][j] = -ConditionalDistr[i][j];
+        logGofr[i][j] = std::log(gofr[i][j]);
+        if (gofr[i][j]<1.e-10) {
+           integrand[i][j] = x1sqr[i];
+        } else {
+           integrand[i][j] = (gofr[i][j]*logGofr[i][j]-gofr[i][j]+1)*x1sqr[i];
+        }
      }
   }
-  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) outputGofr(ConditionalDistr,"conditional.txt");
-  vector<double> OLE(nhist_[0]);
-  OLE = integrateMarginal(integrand,deltaCosAngle,1);
-  for(unsigned i=0;i<nhist_[0];++i){
-     OLE[i] *= -2*pi/volumeOfAngles;
-  }
-  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
-     output1Dfunction(OLE, x1, "OLE.txt");
-  }
-  // Build integrands for orientational and translational part of the pair entropy
-  vector<double> integrandOrientation(nhist_[0]);
-  vector<double> integrandTranslation(nhist_[0]);
-  for(unsigned j=0;j<nhist_[0];++j){
-    double x=deltar*(j+0.5);
-    double logGofrMarginalR = std::log(gofrMarginalR[j]);
-    if (gofrMarginalR[j]<1.e-10) {
-      integrandTranslation[j] = x*x;
-    } else {
-      integrandTranslation[j] = (gofrMarginalR[j]*logGofrMarginalR-gofrMarginalR[j]+1)*x*x;
+  vector<double> delta(2);
+  delta[0]=deltar;
+  delta[1]=deltaCosAngle;
+  //log.printf("Integral of gaussians is %f \n", integrate(gofr,delta));
+  double TwoPiDensityVolAngles=(2*pi/volumeOfAngles)*density;
+  pairEntropy=-TwoPiDensityVolAngles*integrate(integrand,delta);
+  //std::cout << "Integrand and integration: " << float( clock () - begin_time ) << "\n";
+  // Derivatives
+  if (!doNotCalculateDerivatives() ) {
+    for(unsigned int k=rank;k<getNumberOfAtoms();k+=stride) {
+      Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
+      for(unsigned i=0;i<nhist_[0];++i){
+        for(unsigned j=0;j<nhist_[1];++j){
+          if (gofr[i][j]>1.e-10) {
+            integrandDerivatives[i][j] = gofrPrime[k*nhist_[0]*nhist_[1]+j*nhist_[0]+i]*logGofr[i][j]*x1sqr[i];
+          }
+        }
+      }
+      // Integrate
+      deriv[k] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
     }
-    integrandOrientation[j] = gofrMarginalR[j]*OLE[j]*x*x;
+    if(!serial){
+      comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+    }
+    // Virial of positions
+    // Construct virial integrand
+    Matrix<Tensor> integrandVirial(nhist_[0],nhist_[1]);
+    for(unsigned i=0;i<nhist_[0];++i){
+       for(unsigned j=0;j<nhist_[1];++j){
+          if (gofr[i][j]>1.e-10) {
+             integrandVirial[i][j] = gofrVirial[i][j]*logGofr[i][j]*x1sqr[i];
+          }
+      }
+    }
+    // Integrate virial
+    virial = -TwoPiDensityVolAngles*integrate(integrandVirial,delta);
+    // Virial of volume
+    // Construct virial integrand
+    Matrix<double> integrandVirialVolume(nhist_[0],nhist_[1]);
+    for(unsigned i=0;i<nhist_[0];++i){
+       for(unsigned j=0;j<nhist_[1];++j){
+          integrandVirialVolume[i][j] = (-gofr[i][j]+1)*x1sqr[i];
+       }
+    }
+    // Integrate virial
+    virial += -TwoPiDensityVolAngles*integrate(integrandVirialVolume,delta)*Tensor::identity();
   }
-  */
+  // Assign output quantities
+  for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
   setValue           (pairEntropy);
-  /*
-  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
-     output1Dfunction(integrandTranslation, x1, "integrandTranslation.txt");
-  }
-  if (doOutputGofr && (getStep()%outputStride==0)  && rank==0) {
-     output1Dfunction(integrandOrientation, x1, "integrandOrientation.txt");
-  }
-  */
-  // Output of integrands
-  //Value* translational=getPntrToComponent("translational");
-  //Value* orientational=getPntrToComponent("orientational");
-  //translational->set(-2*pi*density*integrate(integrandTranslation,deltar));
-  //orientational->set(density*integrate(integrandOrientation,deltar));
+  setBoxDerivatives  (virial);
 }
 
-double PairOrientationalEntropy::kernel(vector<double> distance,double&der)const{
+double PairOrientationalEntropy::kernel(vector<double> distance,vector<double>&der)const{
   // Gaussian function and derivative
-  double result = (1./(2.*pi*sigma_[0]*sigma_[1]))*std::exp(-distance[0]*distance[0]/(2*sigma_[0]*sigma_[0])-distance[1]*distance[1]/(2*sigma_[1]*sigma_[1])) ;
-  der = 0.;
+  double result = invTwoPiSigma1Sigma2*std::exp(-distance[0]*distance[0]/twoSigma1Sqr-distance[1]*distance[1]/twoSigma2Sqr) ;
+  der[0] = -distance[0]*result/sigma1Sqr;
+  der[1] = -distance[1]*result/sigma2Sqr;
   return result;
 }
 
@@ -569,6 +662,61 @@ double PairOrientationalEntropy::integrate(Matrix<double> integrand, vector<doub
   result *= delta[0]*delta[1];
   return result;
 }
+
+Vector PairOrientationalEntropy::integrate(Matrix<Vector> integrand, vector<double> delta)const{
+  // Trapezoid rule
+  Vector result;
+  for(unsigned i=1;i<(nhist_[0]-1);++i){
+     for(unsigned j=1;j<(nhist_[1]-1);++j){
+        result += integrand[i][j];
+     }
+  }
+  // Edges
+  for(unsigned i=1;i<(nhist_[0]-1);++i){
+     result += 0.5*integrand[i][0];
+     result += 0.5*integrand[i][nhist_[1]-1];
+  }
+  for(unsigned j=1;j<(nhist_[1]-1);++j){
+     result += 0.5*integrand[0][j];
+     result += 0.5*integrand[nhist_[0]-1][j];
+  }
+  // Corners
+  result += 0.25*integrand[0][0];
+  result += 0.25*integrand[nhist_[0]-1][0];
+  result += 0.25*integrand[0][nhist_[1]-1];
+  result += 0.25*integrand[nhist_[0]-1][nhist_[1]-1];
+  // Spacing
+  result *= delta[0]*delta[1];
+  return result;
+}
+
+Tensor PairOrientationalEntropy::integrate(Matrix<Tensor> integrand, vector<double> delta)const{
+  // Trapezoid rule
+  Tensor result;
+  for(unsigned i=1;i<(nhist_[0]-1);++i){
+     for(unsigned j=1;j<(nhist_[1]-1);++j){
+        result += integrand[i][j];
+     }
+  }
+  // Edges
+  for(unsigned i=1;i<(nhist_[0]-1);++i){
+     result += 0.5*integrand[i][0];
+     result += 0.5*integrand[i][nhist_[1]-1];
+  }
+  for(unsigned j=1;j<(nhist_[1]-1);++j){
+     result += 0.5*integrand[0][j];
+     result += 0.5*integrand[nhist_[0]-1][j];
+  }
+  // Corners
+  result += 0.25*integrand[0][0];
+  result += 0.25*integrand[nhist_[0]-1][0];
+  result += 0.25*integrand[0][nhist_[1]-1];
+  result += 0.25*integrand[nhist_[0]-1][nhist_[1]-1];
+  // Spacing
+  result *= delta[0]*delta[1];
+  return result;
+}
+
 
 vector<double> PairOrientationalEntropy::integrateMarginal(Matrix<double> integrand, double delta, unsigned dim)const{
   // First argument: Matrix defining the integrand. Only 2 dimensions are allowed.
@@ -673,6 +821,17 @@ void PairOrientationalEntropy::outputIntegrand(vector<double> integrand) {
   gofrOfile.close();
 }
 
+bool PairOrientationalEntropy::insideEllipse(int i,int j,unsigned bini, unsigned binj, unsigned iaxis, unsigned jaxis) {
+  double x = i - (double) bini;
+  double y = j - (double) binj;
+  double a = iaxis;
+  double b = jaxis;
+  double ellipse = (x*x/(a*a) + y*y/(b*b));
+  if ( ellipse>1. ) return false;
+  else return true;
+}
+
+//unsigned PairOrientationalEntropy::pos3Darray(unsigned i, unsigned j, unsigned k, int size1, int size
 
 }
 }

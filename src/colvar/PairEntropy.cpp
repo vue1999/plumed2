@@ -21,7 +21,6 @@
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "Colvar.h"
 #include "ActionRegister.h"
-#include "tools/NeighborList.h"
 #include "tools/NeighborListParallel.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
@@ -274,7 +273,6 @@ PairEntropy::~PairEntropy(){
 
 void PairEntropy::prepare(){
   if(doneigh && nl->getStride()>0){
-    requestAtoms(nl->getFullAtomList());
     if(firsttime) {
       invalidateList=true;
       firsttime=false;
@@ -342,11 +340,13 @@ void PairEntropy::calculate()
         if (maxBin > (nhist-1)) maxBin=nhist-1;
         for(int k=minBin;k<maxBin+1;k+=1) {
           gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
-          Vector value = dfunc * distance_versor;
-          gofrPrime[k][i0] += value;
-          gofrPrime[k][i1] -= value;
-          Tensor vv(value, distance);
-          gofrVirial[k] += vv;
+          if (!doNotCalculateDerivatives()) {
+             Vector value = dfunc * distance_versor;
+             gofrPrime[k][i0] += value;
+             gofrPrime[k][i1] -= value;
+             Tensor vv(value, distance);
+             gofrVirial[k] += vv;
+          }
         }
       }
     }
@@ -377,11 +377,13 @@ void PairEntropy::calculate()
            if (maxBin > (nhist-1)) maxBin=nhist-1;
            for(int k=minBin;k<maxBin+1;k+=1) {
              gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
-             Vector value = dfunc * distance_versor;
-             gofrPrime[k][i0] += value;
-             gofrPrime[k][i1] -= value;
-             Tensor vv(value, distance);
-             gofrVirial[k] += vv;
+             if (!doNotCalculateDerivatives()) {
+                Vector value = dfunc * distance_versor;
+                gofrPrime[k][i0] += value;
+                gofrPrime[k][i1] -= value;
+                Tensor vv(value, distance);
+                gofrVirial[k] += vv;
+             }
            }
          }
       }
@@ -389,23 +391,27 @@ void PairEntropy::calculate()
   }
   if(!serial){
     comm.Sum(&gofr[0],nhist);
-    comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
-    comm.Sum(&gofrVirial[0],nhist);
+    if (!doNotCalculateDerivatives()) {
+       comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
+       comm.Sum(&gofrVirial[0],nhist);
+    }
   }
   // Calculate volume and density
   double volume=getBox().determinant();
-   double density;
-   if (density_given>0) density=density_given;
-   else density=getNumberOfAtoms()/volume;
+  double density;
+  if (density_given>0) density=density_given;
+  else density=getNumberOfAtoms()/volume;
   // Normalize g(r)
   double TwoPiDensity = 2*pi*density;
   double normConstantBase = TwoPiDensity*getNumberOfAtoms();
   for(unsigned j=1;j<nhist;++j){
     double normConstant = normConstantBase*vectorX2[j];
     gofr[j] /= normConstant;
-    gofrVirial[j] /= normConstant;
-    for(unsigned k=0;k<getNumberOfAtoms();++k){
-      gofrPrime[j][k] /= normConstant;
+    if (!doNotCalculateDerivatives()) {
+       gofrVirial[j] /= normConstant;
+       for(unsigned k=0;k<getNumberOfAtoms();++k){
+          gofrPrime[j][k] /= normConstant;
+       }
     }
   }
   // Average g(r)
