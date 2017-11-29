@@ -34,10 +34,10 @@ using namespace std;
 
 NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, const vector<AtomNumber>& list1,
                            const bool& do_pair, const bool& do_pbc, const Pbc& pbc, Communicator& cc, Log& log,
-                           const double& distance, const int& stride, const double& skin): reduced(false),
+                           const bool& do_reduced_list, const double& distance, const int& stride, const double& skin): 
   do_pair_(do_pair), do_pbc_(do_pbc), pbc_(&pbc),
   distance_(distance), stride_(stride), mycomm(cc), mylog(log),
-  skin_(skin) 
+  skin_(skin), do_reduced_list_(do_reduced_list)
 {
 // store full list of atoms needed
   fullatomlist_=list0;
@@ -63,10 +63,10 @@ NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, cons
 
 NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, const bool& do_pbc,
                            const Pbc& pbc, Communicator& cc, Log& log, const double& distance,
-                           const int& stride, const double& skin): reduced(false),
+                           const bool& do_reduced_list, const int& stride, const double& skin):
   do_pbc_(do_pbc), pbc_(&pbc),
   distance_(distance), stride_(stride), mycomm(cc), mylog(log),
-  skin_(skin) 
+  skin_(skin) , do_reduced_list_(do_reduced_list)
 {
   fullatomlist_=list0;
   nlist0_=list0.size();
@@ -159,6 +159,37 @@ void NeighborListParallel::update(const vector<Vector>& positions) {
        }
     }
   }
+  // If needed, build a shared neighbor list between processors
+  if (!do_reduced_list_ && mpi_stride>1) {
+     //unsigned allNeighNum=neighbors_.size();
+     //mycomm.Sum(allNeighNum);
+     //std::cout << neighbors_.size() << " " << allNeighNum << "\n";
+     std::vector<unsigned> neighbors_ranks_(mycomm.Get_size());
+     unsigned neighNum = neighbors_.size();
+     mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
+     unsigned allNeighNum=0;
+     for(unsigned int i=0;i<mycomm.Get_size();i+=1) allNeighNum+=neighbors_ranks_[i];
+     std::vector<std::pair<unsigned,unsigned> > all_neighbors_(allNeighNum);
+     std::vector<unsigned> sum_neighbors_ranks_(mpi_stride);
+     for(unsigned int i=1;i<mpi_stride;i+=1) {
+        for(unsigned int j=0;j<i;j+=1) {
+           sum_neighbors_ranks_[i] += neighbors_ranks_[j];
+        }
+     }
+     for(unsigned int i=0;i<neighbors_.size();i+=1) {
+        all_neighbors_[sum_neighbors_ranks_[mpi_rank]+i]=neighbors_[i];
+     }
+     mycomm.Sum(&all_neighbors_[0].first,2*allNeighNum);
+     //mycomm.Allgather(&neighbors_[0].first,2*neighbors_.size(),&all_neighbors_[0].first,2*neighbors_.size());
+     neighbors_ = all_neighbors_;
+  }
+  /*
+  if (mpi_rank==0) {
+     for(unsigned int i=0;i<neighbors_.size();i+=1) {
+        std::cout << neighbors_[i].first << " " <<  neighbors_[i].second << "\n";
+     }
+  }
+  */
   gatherStats(positions);
   // Store positions for checking
   for(unsigned int i=0;i<fullatomlist_.size();i++) {
@@ -206,10 +237,12 @@ unsigned NeighborListParallel::size() const {
 }
 
 pair<unsigned,unsigned> NeighborListParallel::getClosePair(unsigned i) const {
+  if (!do_reduced_list_) plumed_merror("Cannot ask for individual pair when the the reduced neighbor list is not used.");
   return neighbors_[i];
 }
 
 vector<unsigned> NeighborListParallel::getNeighbors(unsigned index) {
+  if (do_reduced_list_) plumed_merror("Cannot ask for all neighbors when the reduced neighbor list is used.");
   vector<unsigned> neighbors;
   for(unsigned int i=0; i<size(); ++i) {
     if(neighbors_[i].first==index)  neighbors.push_back(neighbors_[i].second);

@@ -37,8 +37,7 @@ class Pbc;
 /// A class that implements neighbor lists from two lists or a single list of atoms
 class NeighborListParallel
 {
-  bool reduced;
-  bool do_pair_,do_pbc_,twolists_,firsttime_;
+  bool do_pair_,do_pbc_,twolists_,firsttime_, do_reduced_list_;
   const PLMD::Pbc* pbc_;
   std::vector<PLMD::AtomNumber> fullatomlist_,requestlist_;
   std::vector<PLMD::Vector> positions_old_;
@@ -59,10 +58,10 @@ public:
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0,
                const std::vector<PLMD::AtomNumber>& list1,
                const bool& do_pair, const bool& do_pbc, const PLMD::Pbc& pbc, Communicator& cc,
-               Log& log, const double& distance=1.0e+30, const int& stride=0, const double& skin=0.1);
+               Log& log,  const bool& do_reduced_list=true, const double& distance=1.0e+30, const int& stride=0, const double& skin=0.1);
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0, const bool& do_pbc,
                const PLMD::Pbc& pbc, Communicator& cc, Log& log, const double& distance=1.0e+30,
-               const int& stride=0, const double& skin=0.1);
+               const bool& do_reduced_list=true, const int& stride=0, const double& skin=0.1);
 /// Return the list of all atoms. These are needed to rebuild the neighbor list.
   std::vector<PLMD::AtomNumber>& getFullAtomList();
 /// Check if the nieghbor list must be rebuilt
