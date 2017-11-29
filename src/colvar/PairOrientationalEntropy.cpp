@@ -167,11 +167,11 @@ firsttime(true)
   parseVector("SIGMA",sigma_);
   if(sigma_.size() != 2) error("SIGMA keyword takes two input values");
   log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviations %f and %f \n", sigma_[0], sigma_[1]);
-  double rcut = maxr + 3*sigma_[0];
-  rcut2 = (maxr + 2*sigma_[0])*(maxr + 2*sigma_[0]);  // 2*sigma is hard coded
+  double rcut = maxr + 2*sigma_[0];  // 2*sigma is hard coded
+  rcut2 = rcut*rcut;
   if(doneigh){
-    if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
-    nl_skin=nl_cut-maxr;
+    if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 2*SIGMA");
+    nl_skin=nl_cut-rcut;
   }
 
   parseVector("NHIST",nhist_);
@@ -182,7 +182,7 @@ firsttime(true)
   }
   if(nhist_.size() != 2) error("NHIST keyword takes two input values");
   nhist1_nhist2_=nhist_[0]*nhist_[1];
-  log.printf("  The interval is partitioned in %u equal parts in r and %u equal parts in theta. \n", nhist_[0], nhist_[1] );
+  log.printf("  The r-theta space is discretized using a grid of size %u times %u. \n", nhist_[0], nhist_[1] );
   log.printf("  The integration is performed with the trapezoid rule. \n");
 
   doOutputGofr=false;

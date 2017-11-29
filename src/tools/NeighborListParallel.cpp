@@ -110,8 +110,10 @@ void NeighborListParallel::printStats() {
   mylog.printf("Ave neighs/atom = %f \n", avgTotalNeighbors_ /(double) nlist0_);
   mylog.printf("Neighbor list builds = %d \n",numberOfBuilds_);
   mylog.printf("Dangerous builds = %d \n",dangerousBuilds_);
-  mylog.printf("Average load imbalance (min/max) = %f \n",avgLoadImbalance_);
-  mylog.printf("Maximum load imbalance (min/max) = %f \n",maxLoadImbalance_);
+  if (do_reduced_list_) {
+    mylog.printf("Average load imbalance (min/max) = %f \n",avgLoadImbalance_);
+    mylog.printf("Maximum load imbalance (min/max) = %f \n",maxLoadImbalance_);
+  }
 }
 
 void NeighborListParallel::update(const vector<Vector>& positions) {
@@ -204,20 +206,25 @@ void NeighborListParallel::gatherStats(const vector<Vector>& positions) {
   }
   firsttime_=false;
   numberOfBuilds_++;
-  std::vector<unsigned> neighbors_ranks_(mycomm.Get_size());
   unsigned neighNum = neighbors_.size();
-  mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
-  unsigned allNeighNum=0;
-  for(unsigned int i=0;i<mycomm.Get_size();i+=1) allNeighNum+=neighbors_ranks_[i];
+  unsigned allNeighNum;
+  if (do_reduced_list_) {
+     std::vector<unsigned> neighbors_ranks_(mycomm.Get_size());
+     mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
+     allNeighNum=0;
+     for(unsigned int i=0;i<mycomm.Get_size();i+=1) allNeighNum+=neighbors_ranks_[i];
+     auto min_element_ = *std::min_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
+     auto max_element_ = *std::max_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
+     //mylog.printf("Value: Min %d max %d \n",min_element_,max_element_ );
+     double loadImbalance=min_element_ / (double) max_element_;
+     //mylog.printf("loadImbalance %f \n", loadImbalance);
+     if (maxLoadImbalance_>loadImbalance) maxLoadImbalance_=loadImbalance;
+     avgLoadImbalance_ += (loadImbalance-avgLoadImbalance_)/numberOfBuilds_;
+  } else {
+     allNeighNum=neighNum;
+  }
   //for(unsigned int i=0;i<mpi_stride;i+=1) mylog.printf("core %d neighbors %d \n", i,neighbors_ranks_[i]);
   avgTotalNeighbors_ += (allNeighNum-avgTotalNeighbors_)/numberOfBuilds_;
-  auto min_element_ = *std::min_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
-  auto max_element_ = *std::max_element(neighbors_ranks_.begin(), neighbors_ranks_.end());
-  //mylog.printf("Value: Min %d max %d \n",min_element_,max_element_ );
-  double loadImbalance=min_element_ / (double) max_element_;
-  //mylog.printf("loadImbalance %f \n", loadImbalance);
-  if (maxLoadImbalance_>loadImbalance) maxLoadImbalance_=loadImbalance;
-  avgLoadImbalance_ += (loadImbalance-avgLoadImbalance_)/numberOfBuilds_;
 }
 
 int NeighborListParallel::getStride() const {
