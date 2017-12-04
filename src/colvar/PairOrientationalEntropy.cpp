@@ -92,6 +92,9 @@ class PairOrientationalEntropy : public Colvar {
   Matrix<double> avgGofr;
   unsigned iteration;
   bool doAverageGofr;
+  // Up-down symmetry
+  bool doUpDownSymmetry;
+  double startCosAngle;
 public:
   explicit PairOrientationalEntropy(const ActionOptions&);
   ~PairOrientationalEntropy();
@@ -109,6 +112,7 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
   keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
+  keys.addFlag("UP_DOWN_SYMMETRY",false,"The symmetry is such that parallel and antiparallel vectors are not distinguished. The angle goes from 0 to pi/2 instead of from 0 to pi.");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
@@ -188,12 +192,12 @@ firsttime(true)
   doOutputGofr=false;
   parseFlag("OUTPUT_GOFR",doOutputGofr);
   if (doOutputGofr) { 
-     log.printf("  The g(r) will be written to a file \n.");
+     log.printf("  The g(r) will be written to a file \n");
   }
   doOutputIntegrand=false;
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
   if (doOutputIntegrand) {
-     log.printf("  The integrand will be written to a file \n.");
+     log.printf("  The integrand will be written to a file \n");
   }
   outputStride=1;
   parse("OUTPUT_STRIDE",outputStride);
@@ -205,9 +209,13 @@ firsttime(true)
   parseFlag("AVERAGE_GOFR",doAverageGofr);
   if (doAverageGofr) {
      iteration = 1;
-     log.printf("  The g(r) will be averaged over all frames");
+     log.printf("  The g(r) will be averaged over all frames \n");
      avgGofr.resize(nhist_[0],nhist_[1]);
   }
+
+  doUpDownSymmetry=false;
+  parseFlag("UP_DOWN_SYMMETRY",doUpDownSymmetry);
+  if (doUpDownSymmetry) log.printf("  The angle can take values between 0 and pi/2 due to the up down symmetry. \n");
 
   checkRead();
 
@@ -235,7 +243,14 @@ firsttime(true)
   twoSigma1Sqr = 2*sigma_[0]*sigma_[0];
   twoSigma2Sqr = 2*sigma_[1]*sigma_[1];
   deltar=maxr/(nhist_[0]-1);
-  deltaCosAngle=2./(nhist_[1]-1);
+  if (!doUpDownSymmetry) {
+     deltaCosAngle=2./(nhist_[1]-1);
+     startCosAngle=-1.;
+  }
+  else {
+     deltaCosAngle=1./(nhist_[1]-1);
+     startCosAngle=0.;
+  }
   deltaBin = std::floor(2*sigma_[0]/deltar); // 2*sigma is hard coded
   deltaBinAngle = std::floor(2*sigma_[1]/deltaCosAngle); // 2*sigma is hard coded
 
@@ -248,7 +263,7 @@ firsttime(true)
      x1sqr[i]=x1[i]*x1[i];
   }
   for(unsigned i=0;i<nhist_[1];++i){
-     x2[i]=-1+deltaCosAngle*i;
+     x2[i]=startCosAngle+deltaCosAngle*i;
      x2sqr[i]=x2[i]*x2[i];
   }
 }
@@ -296,7 +311,9 @@ void PairOrientationalEntropy::calculate()
   // Normalization of g(r)
   double normConstantBase = 2*pi*center_lista.size()*density;
   // Take into account "volume" of angles
-  double volumeOfAngles = 2.;
+  double volumeOfAngles;
+  if (!doUpDownSymmetry) volumeOfAngles = 2.;
+  else volumeOfAngles = 1.;
   normConstantBase /= volumeOfAngles;
   // Setup parallelization
   unsigned stride=comm.Get_size();
@@ -345,7 +362,16 @@ void PairOrientationalEntropy::calculate()
              double inv_v1_sqr=inv_v1*inv_v1;
              double inv_v1_inv_v2=inv_v1*inv_v2;
              double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-             unsigned binAngle=std::floor((cosAngle+1.)/deltaCosAngle);
+             Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+             if (doUpDownSymmetry && cosAngle<0) {
+                der_mol1 *= -1.;
+             }
+             unsigned binAngle;
+             if (doUpDownSymmetry && cosAngle<0) {
+                binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
+             } else {
+                binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
+             }
              int minBin, maxBin; // These cannot be unsigned
              // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
              minBin=bin - deltaBin;
@@ -357,14 +383,17 @@ void PairOrientationalEntropy::calculate()
              // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
              minBinAngle=binAngle - deltaBinAngle;
              maxBinAngle=binAngle +  deltaBinAngle;
-             Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
              for(int k=minBin;k<maxBin+1;k+=1) {
                invNormKernel=invTwoPiSigma1Sigma2/(normConstantBase*x1sqr[k]);
                vector<double> pos(2);
                pos[0]=x1[k]-distanceModulo;
                for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-                  double theta=-1+deltaCosAngle*l;
-                  pos[1]=theta-cosAngle;
+                  double theta=startCosAngle+deltaCosAngle*l;
+                  if (doUpDownSymmetry && cosAngle<0) {
+                     pos[1]=theta+cosAngle;
+                  } else {
+                     pos[1]=theta-cosAngle;
+                  }
                   // Include periodic effects
                   int h;
                   if (l<0) {
@@ -428,9 +457,18 @@ void PairOrientationalEntropy::calculate()
           //double inv_v2_sqr=inv_v2*inv_v2;
           double inv_v1_inv_v2=inv_v1*inv_v2;
           double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
+          Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+          if (doUpDownSymmetry && cosAngle<0) {
+             der_mol1 *= -1.;
+          }
+          unsigned binAngle;
+          if (doUpDownSymmetry && cosAngle<0) {
+             binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
+          } else {
+             binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
+          }
           //double angle=acos(cosAngle);
           //log.printf("Angle %f radians %f degrees \n", angle, angle*180./pi);
-          unsigned binAngle=std::floor((cosAngle+1.)/deltaCosAngle);
           int minBin, maxBin; // These cannot be unsigned
           // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
           minBin=bin - deltaBin;
@@ -443,15 +481,18 @@ void PairOrientationalEntropy::calculate()
           minBinAngle=binAngle - deltaBinAngle;
           maxBinAngle=binAngle +  deltaBinAngle;
           //log.printf("minBinAngle %d maxBinAngle %d binAngle %d deltaBinAngle %d \n",minBinAngle,maxBinAngle,binAngle,deltaBinAngle);
-          Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
           for(int k=minBin;k<maxBin+1;k+=1) {
             //double normConstant=normConstantBase*x1sqr[k];
             invNormKernel=invTwoPiSigma1Sigma2/(normConstantBase*x1sqr[k]);
             vector<double> pos(2);
             pos[0]=x1[k]-distanceModulo;
             for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-               double theta=-1+deltaCosAngle*l;
-               pos[1]=theta-cosAngle;
+               double theta=startCosAngle+deltaCosAngle*l;
+               if (doUpDownSymmetry && cosAngle<0) {
+                  pos[1]=theta+cosAngle;
+               } else {
+                  pos[1]=theta-cosAngle;
+               }
                // Include periodic effects
                int h;
                if (l<0) {
@@ -694,22 +735,10 @@ void PairOrientationalEntropy::outputGofr(Matrix<double> gofr, const char* fileN
   PLMD::OFile gofrOfile;
   gofrOfile.open(fileName);
   for(unsigned i=0;i<nhist_[0];++i){
-     double r=deltar*i;
      for(unsigned j=0;j<nhist_[1];++j){
-        double theta=-1+deltaCosAngle*j;
-        gofrOfile.printField("r",r).printField("theta",theta).printField("gofr",gofr[i][j]).printField();
+        gofrOfile.printField("r",x1[i]).printField("theta",x2[j]).printField("gofr",gofr[i][j]).printField();
      }
      gofrOfile.printf("\n");
-  }
-  gofrOfile.close();
-}
-
-void PairOrientationalEntropy::outputIntegrand(vector<double> integrand) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open("integrand.txt");
-  for(unsigned i=0;i<integrand.size();++i){
-     double r=deltar*(i+0.5);
-     gofrOfile.printField("r",r).printField("integrand",integrand[i]).printField();
   }
   gofrOfile.close();
 }
