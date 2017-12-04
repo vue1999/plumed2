@@ -178,11 +178,17 @@ firsttime(true)
     nl_skin=nl_cut-rcut;
   }
 
+  doUpDownSymmetry=false;
+  parseFlag("UP_DOWN_SYMMETRY",doUpDownSymmetry);
+  if (doUpDownSymmetry) log.printf("  The angle can take values between 0 and pi/2 due to the up down symmetry. \n");
+
   parseVector("NHIST",nhist_);
   if (nhist_.size()<1) {
      nhist_.resize(2);
-     nhist_[0]=ceil(maxr/sigma_[0]) + 1; // Default value
-     nhist_[1]=ceil(2./sigma_[1]) + 1; // Default value
+     // Default values
+     nhist_[0]=ceil(maxr/sigma_[0]) + 1; 
+     if (doUpDownSymmetry) nhist_[1]=ceil(1./sigma_[1]) + 1;
+     else nhist_[1]=ceil(2./sigma_[1]) + 1;
   }
   if(nhist_.size() != 2) error("NHIST keyword takes two input values");
   nhist1_nhist2_=nhist_[0]*nhist_[1];
@@ -212,10 +218,6 @@ firsttime(true)
      log.printf("  The g(r) will be averaged over all frames \n");
      avgGofr.resize(nhist_[0],nhist_[1]);
   }
-
-  doUpDownSymmetry=false;
-  parseFlag("UP_DOWN_SYMMETRY",doUpDownSymmetry);
-  if (doUpDownSymmetry) log.printf("  The angle can take values between 0 and pi/2 due to the up down symmetry. \n");
 
   checkRead();
 
