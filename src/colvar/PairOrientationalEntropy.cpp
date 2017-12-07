@@ -148,7 +148,7 @@ firsttime(true)
 
 // neighbor list stuff
   doneigh=false;
-  bool nl_reduced_list=false;
+  bool nl_full_list=true;
   double nl_cut=0.0;
   double nl_skin;
   int nl_st=-1;
@@ -223,7 +223,7 @@ firsttime(true)
 
   // Neighbor lists
   if (doneigh) {
-    nl= new NeighborListParallel(center_lista,pbc,getPbc(),comm,log,nl_cut,nl_reduced_list,nl_st,nl_skin);
+    nl= new NeighborListParallel(center_lista,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
     log.printf("  using neighbor lists with\n");
     log.printf("  cutoff %f, and skin %f\n",nl_cut,nl_skin);
     if(nl_st>=0){
@@ -332,27 +332,27 @@ void PairOrientationalEntropy::calculate()
       vector<Vector> centerPositions(getPositions().begin(),getPositions().begin() + center_lista.size());
       nl->update(centerPositions);
     }
-    for(unsigned int i=rank;i<center_lista.size();i+=stride) {
+    for(unsigned int i=0;i<nl->getNumberOfLocalAtoms();i+=1) {
        // Loop over neighbors
        std::vector<unsigned> neighbors;
-       neighbors=nl->getNeighbors(i);
+       unsigned index=nl->getIndexOfLocalAtom(i);
+       neighbors=nl->getNeighbors(index);
        for(unsigned int j=0;j<neighbors.size();j+=1) {  
           double d2;
           vector<double> dfunc(2);
-          Vector distance;
-          Vector distance_versor;
-          if(getAbsoluteIndex(i)==getAbsoluteIndex(neighbors[j])) continue;
+          Vector distance, distance_versor;
+          if(getAbsoluteIndex(index)==getAbsoluteIndex(neighbors[j])) continue;
           if(pbc){
-             distance=pbcDistance(getPosition(i),getPosition(neighbors[j]));
+             distance=pbcDistance(getPosition(index),getPosition(neighbors[j]));
           } else {
-             distance=delta(getPosition(i),getPosition(neighbors[j]));
+             distance=delta(getPosition(index),getPosition(neighbors[j]));
           }
           if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
              double distanceModulo=std::sqrt(d2);
              Vector distance_versor = distance / distanceModulo;
              unsigned bin=std::floor(distanceModulo/deltar);
-             unsigned atom1_mol1=i+center_lista.size();
-             unsigned atom2_mol1=i+center_lista.size()+start_lista.size();
+             unsigned atom1_mol1=index+center_lista.size();
+             unsigned atom2_mol1=index+center_lista.size()+start_lista.size();
              unsigned atom1_mol2=neighbors[j]+center_lista.size();
              unsigned atom2_mol2=neighbors[j]+center_lista.size()+start_lista.size();
              Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
@@ -417,9 +417,9 @@ void PairOrientationalEntropy::calculate()
                      value1 = dfunc[0]*distance_versor;
                      value2_mol1 = dfunc[1]*der_mol1;
                   }
-                  gofrPrimeCenter[i*nhist1_nhist2_+k*nhist_[1]+h] += value1;
-                  gofrPrimeStart[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
-                  gofrPrimeEnd[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
+                  gofrPrimeCenter[index*nhist1_nhist2_+k*nhist_[1]+h] += value1;
+                  gofrPrimeStart[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
+                  gofrPrimeEnd[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
                   Tensor vv1(value1, distance);
                   Tensor vv2_mol1(value2_mol1, mol_vector1);
                   gofrVirial[k][h] += vv1/2.+vv2_mol1;
@@ -590,25 +590,49 @@ void PairOrientationalEntropy::calculate()
   //begin_time = clock();
   // Derivatives
   if (!doNotCalculateDerivatives() ) {
-    for(unsigned int k=rank;k<center_lista.size();k+=stride) {
-      // Center atom
-      unsigned start_atom=k+center_lista.size();
-      unsigned end_atom=k+center_lista.size()+start_lista.size();
-      Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
-      Matrix<Vector> integrandDerivativesStart(nhist_[0],nhist_[1]);
-      Matrix<Vector> integrandDerivativesEnd(nhist_[0],nhist_[1]);
-      for(unsigned i=0;i<nhist_[0];++i){
-        for(unsigned j=0;j<nhist_[1];++j){
-          if (gofr[i][j]>1.e-10) {
-            integrandDerivatives[i][j] = gofrPrimeCenter[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-            integrandDerivativesStart[i][j] = gofrPrimeStart[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-            integrandDerivativesEnd[i][j] = gofrPrimeEnd[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-          }
-        }
-      }
-      deriv[k] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
-      deriv[start_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart,delta);
-      deriv[end_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd,delta);
+    if (doneigh) {
+       for(unsigned int k=0;k<nl->getNumberOfLocalAtoms();k+=1) {
+         unsigned index=nl->getIndexOfLocalAtom(k);
+         // Center atom
+         unsigned start_atom=index+center_lista.size();
+         unsigned end_atom=index+center_lista.size()+start_lista.size();
+         Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd(nhist_[0],nhist_[1]);
+         for(unsigned i=0;i<nhist_[0];++i){
+           for(unsigned j=0;j<nhist_[1];++j){
+             if (gofr[i][j]>1.e-10) {
+               integrandDerivatives[i][j] = gofrPrimeCenter[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart[i][j] = gofrPrimeStart[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd[i][j] = gofrPrimeEnd[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+             }
+           }
+         }
+         deriv[index] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
+         deriv[start_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart,delta);
+         deriv[end_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd,delta);
+       }
+    } else {
+       for(unsigned int k=rank;k<center_lista.size();k+=stride) {
+         // Center atom
+         unsigned start_atom=k+center_lista.size();
+         unsigned end_atom=k+center_lista.size()+start_lista.size();
+         Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd(nhist_[0],nhist_[1]);
+         for(unsigned i=0;i<nhist_[0];++i){
+           for(unsigned j=0;j<nhist_[1];++j){
+             if (gofr[i][j]>1.e-10) {
+               integrandDerivatives[i][j] = gofrPrimeCenter[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart[i][j] = gofrPrimeStart[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd[i][j] = gofrPrimeEnd[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+             }
+           }
+         }
+         deriv[k] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
+         deriv[start_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart,delta);
+         deriv[end_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd,delta);
+       }
     }
     if(!serial){
       comm.Sum(&deriv[0][0],3*getNumberOfAtoms());

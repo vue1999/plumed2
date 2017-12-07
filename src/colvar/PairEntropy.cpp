@@ -54,8 +54,7 @@ PAIRENTROPY ...
  LABEL=s2
  ATOMS=1-250
  MAXR=0.65
- SIGMA=0.025
- NHIST=100
+ SIGMA=0.01
  NLIST
  NL_CUTOFF=0.75
  NL_STRIDE=10
@@ -69,9 +68,8 @@ class PairEntropy : public Colvar {
   bool serial;
   // Neighbor list stuff
   bool doneigh;
-  //NeighborList *nl;
   NeighborListParallel *nl;
-  vector<AtomNumber> atoms_lista; //,gb_lista;
+  vector<AtomNumber> atoms_lista;
   bool invalidateList;
   bool firsttime;
   // Output
@@ -81,7 +79,7 @@ class PairEntropy : public Colvar {
   double maxr, sigma;
   unsigned nhist;
   double rcut2;
-  double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
+  double sqrt2piSigma, sigmaSqr2, sigmaSqr, invNormKernel;
   double deltar;
   unsigned deltaBin;
   double density_given;
@@ -103,6 +101,8 @@ class PairEntropy : public Colvar {
   bool doAverageGofr;
   vector<double> avgGofr;
   unsigned iteration;
+  // Low communication variantA
+  bool doLowComm;
 public:
   explicit PairEntropy(const ActionOptions&);
   ~PairEntropy();
@@ -130,6 +130,7 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.01","Width of gaussians ");
   keys.add("optional","REFERENCE_GOFR_FNAME","the name of the file with the reference g(r)");
+  keys.addFlag("LOW_COMM",false,"Use an algorithm with less communication between processors");
 }
 
 PairEntropy::PairEntropy(const ActionOptions&ao):
@@ -152,6 +153,7 @@ firsttime(true)
 
 // neighbor list stuff
   doneigh=false;
+  bool nl_full_list=false;
   double nl_cut=0.0;
   double nl_skin;
   int nl_st=-1;
@@ -160,7 +162,6 @@ firsttime(true)
    parse("NL_CUTOFF",nl_cut);
    if(nl_cut<=0.0) error("NL_CUTOFF should be explicitly specified and positive");
    parse("NL_STRIDE",nl_st);
-   //if(nl_st<=0) error("NL_STRIDE should be explicitly specified and positive");
   }
 
   density_given = -1;
@@ -178,7 +179,7 @@ firsttime(true)
   rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);  // 3*sigma is hard coded
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
-    nl_skin=nl_cut-maxr;
+    nl_skin=nl_cut-(maxr+2*sigma);
   }
   nhist=ceil(maxr/sigma) + 1; // Default value
   parse("NHIST",nhist);
@@ -228,11 +229,19 @@ firsttime(true)
      avgGofr.resize(nhist);
   }
 
+  doLowComm=false;
+  parseFlag("LOW_COMM",doLowComm);
+  if (doLowComm) {
+     log.printf("  Using the low communication variant of the algorithm");
+     nl_full_list=true;
+     if (!doneigh) error("LOW_COMM can only be used with neighbor lists");
+  }
+
   checkRead();
 
   // Neighbor lists
   if (doneigh) {
-    nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_st,nl_skin);
+    nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
     requestAtoms(nl->getFullAtomList());
     log.printf("  using neighbor lists with\n");
     log.printf("  cutoff %f, and skin %f\n",nl_cut,nl_skin);
@@ -241,14 +250,18 @@ firsttime(true)
     } else {
       log.printf("  checking every step for dangerous builds and rebuilding as needed\n");
     }
+    if (nl_full_list) {
+      log.printf("  using a full neighbor list\n");
+    } else {
+      log.printf("  using a half neighbor list\n");
+    }
   } else {
     requestAtoms(atoms_lista);
   }
 
 
   // Define heavily used expressions
-  double sqrt2piSigma = std::sqrt(2*pi)*sigma;
-  invSqrt2piSigma = 1./sqrt2piSigma;
+  sqrt2piSigma = std::sqrt(2*pi)*sigma;
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
   deltar=maxr/(nhist-1.);
@@ -308,7 +321,18 @@ void PairEntropy::calculate()
     stride=comm.Get_size();
     rank=comm.Get_rank();
   }
-  if (doneigh) {
+  // Normalization constant
+  double volume=getBox().determinant();
+  double density;
+  if (density_given>0) density=density_given;
+  else density=getNumberOfAtoms()/volume;
+  double TwoPiDensity = 2*pi*density;
+  double normConstantBase;
+  normConstantBase = TwoPiDensity*getNumberOfAtoms(); // Normalization of g(r)
+  normConstantBase *= sqrt2piSigma; // Normalization of gaussian
+  double invNormConstantBase = 1./normConstantBase; 
+  // Calculation of g(r)
+  if (doneigh && !doLowComm) {
     if(invalidateList){
       nl->update(getPositions());
     }
@@ -339,6 +363,7 @@ void PairEntropy::calculate()
         maxBin=bin +  deltaBin;
         if (maxBin > (nhist-1)) maxBin=nhist-1;
         for(int k=minBin;k<maxBin+1;k+=1) {
+          invNormKernel=invNormConstantBase/vectorX2[k];
           gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
           if (!doNotCalculateDerivatives()) {
              Vector value = dfunc * distance_versor;
@@ -349,6 +374,52 @@ void PairEntropy::calculate()
           }
         }
       }
+    }
+  } else if (doneigh && doLowComm) {
+    if(invalidateList){
+      nl->update(getPositions());
+    }
+    // Loop over all atoms
+    for(unsigned int i=0;i<nl->getNumberOfLocalAtoms();i++) {
+       std::vector<unsigned> neighbors;
+       unsigned index=nl->getIndexOfLocalAtom(i);
+       neighbors=nl->getNeighbors(index);
+       // Loop over neighbors
+       for(unsigned int j=0;j<neighbors.size();j++) {  
+         double dfunc, d2;
+         Vector distance;
+         Vector distance_versor;
+         unsigned i0=index;
+         unsigned i1=neighbors[j];
+         if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+         if(pbc){
+          distance=pbcDistance(getPosition(i0),getPosition(i1));
+         } else {
+          distance=delta(getPosition(i0),getPosition(i1));
+         }
+         if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+           double distanceModulo=std::sqrt(d2);
+           Vector distance_versor = distance / distanceModulo;
+           unsigned bin=std::floor(distanceModulo/deltar);
+           int minBin, maxBin; // These cannot be unsigned
+           // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+           minBin=bin - deltaBin;
+           if (minBin < 0) minBin=0;
+           if (minBin > (nhist-1)) minBin=nhist-1;
+           maxBin=bin +  deltaBin;
+           if (maxBin > (nhist-1)) maxBin=nhist-1;
+           for(int k=minBin;k<maxBin+1;k+=1) {
+             invNormKernel=invNormConstantBase/vectorX2[k];
+             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc)/2.0;
+             if (!doNotCalculateDerivatives()) {
+                Vector value = dfunc * distance_versor;
+                gofrPrime[k][i0] += value;
+                Tensor vv(value/2.0, distance);
+                gofrVirial[k] += vv;
+             }
+           }
+         }
+       }
     }
   } else {
     for(unsigned int i=rank;i<(getNumberOfAtoms()-1);i+=stride) {
@@ -376,6 +447,7 @@ void PairEntropy::calculate()
            maxBin=bin +  deltaBin;
            if (maxBin > (nhist-1)) maxBin=nhist-1;
            for(int k=minBin;k<maxBin+1;k+=1) {
+             invNormKernel=invNormConstantBase/vectorX2[k];
              gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
@@ -392,26 +464,10 @@ void PairEntropy::calculate()
   if(!serial){
     comm.Sum(&gofr[0],nhist);
     if (!doNotCalculateDerivatives()) {
-       comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
-       comm.Sum(&gofrVirial[0],nhist);
-    }
-  }
-  // Calculate volume and density
-  double volume=getBox().determinant();
-  double density;
-  if (density_given>0) density=density_given;
-  else density=getNumberOfAtoms()/volume;
-  // Normalize g(r)
-  double TwoPiDensity = 2*pi*density;
-  double normConstantBase = TwoPiDensity*getNumberOfAtoms();
-  for(unsigned j=1;j<nhist;++j){
-    double normConstant = normConstantBase*vectorX2[j];
-    gofr[j] /= normConstant;
-    if (!doNotCalculateDerivatives()) {
-       gofrVirial[j] /= normConstant;
-       for(unsigned k=0;k<getNumberOfAtoms();++k){
-          gofrPrime[j][k] /= normConstant;
+       if (!doLowComm) {
+          comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
        }
+       comm.Sum(&gofrVirial[0],nhist);
     }
   }
   // Average g(r)
@@ -463,15 +519,31 @@ void PairEntropy::calculate()
   pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
   if (!doNotCalculateDerivatives() ) {
-    for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
-      vector<Vector> integrandDerivatives(nhist);
-      for(unsigned k=nhist_min;k<nhist;++k){
-        if (gofr[k]>1.e-10) {
-          integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*vectorX2[k];
-        }
-      }
-      // Integrate
-      deriv[j] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
+    if (!doLowComm) {
+       // Processors have already shared the gofrPrime
+       for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
+          vector<Vector> integrandDerivatives(nhist);
+          for(unsigned k=nhist_min;k<nhist;++k){
+            if (gofr[k]>1.e-10) {
+              integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*vectorX2[k];
+            }
+          }
+          // Integrate
+          deriv[j] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
+       }
+    } else {
+       // Each processor handles only its own atoms
+       for(unsigned int j=0;j<nl->getNumberOfLocalAtoms();j++) {
+          unsigned index=nl->getIndexOfLocalAtom(j);
+          vector<Vector> integrandDerivatives(nhist);
+          for(unsigned k=nhist_min;k<nhist;++k){
+            if (gofr[k]>1.e-10) {
+              integrandDerivatives[k] = gofrPrime[k][index]*logGofr[k]*vectorX2[k];
+            }
+          }
+          // Integrate
+          deriv[index] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
+       }
     }
     if(!serial){
       comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
@@ -509,7 +581,8 @@ void PairEntropy::calculate()
 
 double PairEntropy::kernel(double distance,double&der)const{
   // Gaussian function and derivative
-  double result = invSqrt2piSigma*std::exp(-distance*distance/sigmaSqr2) ;
+
+  double result = invNormKernel*std::exp(-distance*distance/sigmaSqr2) ;
   der = -distance*result/sigmaSqr;
   return result;
 }
