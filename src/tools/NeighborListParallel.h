@@ -47,7 +47,8 @@ class NeighborListParallel
 /// They are used for checking if the next build is dangerous
   std::vector<PLMD::Vector> positions_old_;
 /// Neighbor list
-  std::vector<std::pair<unsigned,unsigned> > neighbors_;
+  std::vector<std::vector<unsigned>> neighbors_;
+  //std::vector<std::pair<unsigned,unsigned> > neighbors_;
 /// List of the "local" atoms each thread has
   std::vector<unsigned> local_atoms_;
   double distance_, skin_;
@@ -83,7 +84,7 @@ public:
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0,
                const std::vector<PLMD::AtomNumber>& list1,
                const bool& do_pair, const bool& do_pbc, const PLMD::Pbc& pbc, Communicator& cc,
-               Log& log,  const bool& do_full_list=false, const double& distance=1.0e+30, const int& stride=0, const double& skin=0.1);
+               Log& log, const double& distance=1.0e+30,  const bool& do_full_list=false, const int& stride=0, const double& skin=0.1);
   NeighborListParallel(const std::vector<PLMD::AtomNumber>& list0, const bool& do_pbc,
                const PLMD::Pbc& pbc, Communicator& cc, Log& log, const double& distance=1.0e+30,
                const bool& do_full_list=false, const int& stride=0, const double& skin=0.1);
@@ -112,9 +113,9 @@ public:
   unsigned getLastUpdate() const;
 /// Set the step of the last update
   void setLastUpdate(unsigned step);
-/// Get the size of the neighbor list
+/// Get the size of the neighbor list - Obsolete
   unsigned size() const;
-/// Get the i-th pair of the neighbor list
+/// Get the i-th pair of the neighbor list - Obsolete
   std::pair<unsigned,unsigned> getClosePair(unsigned i) const;
 /// Get the list of neighbors of the i-th atom
   std::vector<unsigned> getNeighbors(unsigned i);

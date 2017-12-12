@@ -34,7 +34,7 @@ using namespace std;
 
 NeighborListParallel::NeighborListParallel(const vector<AtomNumber>& list0, const vector<AtomNumber>& list1,
                            const bool& do_pair, const bool& do_pbc, const Pbc& pbc, Communicator& cc, Log& log,
-                           const bool& do_full_list, const double& distance, const int& stride, const double& skin): 
+                           const double& distance, const bool& do_full_list, const int& stride, const double& skin): 
   do_pair_(do_pair), do_pbc_(do_pbc), pbc_(&pbc),
   distance_(distance), stride_(stride), mycomm(cc), mylog(log),
   skin_(skin), do_full_list_(do_full_list)
@@ -134,24 +134,12 @@ void NeighborListParallel::update(const vector<Vector>& positions) {
   // Decide whether to do linked lists or the N^2 calculation
   do_linked_list_=true;
   if ((2*sx+1) >= nbinx || (2*sy+1) >= nbiny || (2*sz+1) >= nbinz) do_linked_list_=false;
-  if (!twolists_) {
-     // One list of atoms
-     if (do_linked_list_) {
-        if (!do_full_list_) updateHalfListWithLinkedList(positions);
-        else updateFullListWithLinkedList(positions);
-     } else {
-        if (!do_full_list_) updateHalfList(positions);
-        else updateFullList(positions);
-     }
+  if (do_linked_list_) {
+     if (!do_full_list_) updateHalfListWithLinkedList(positions);
+     else updateFullListWithLinkedList(positions);
   } else {
-     // Two lists of atoms
-     if (do_linked_list_) {
-        if (do_full_list_) updateFullListWithLinkedList(positions);
-        else plumed_merror("Cannot construct a half list with the twolists_ option");
-     } else {
-        if (do_full_list_) updateFullList(positions);
-        else plumed_merror("Cannot construct a half list with the twolists_ option");
-     }
+     if (!do_full_list_) updateHalfList(positions);
+     else updateFullList(positions);
   }
   gatherStats(positions);
   // Store positions for checking
@@ -165,6 +153,7 @@ void NeighborListParallel::updateFullListWithLinkedList(const vector<Vector>& po
   // Set bin head of chain to -1.0
   binhead = std::vector<int>(nbinx*nbiny*nbinz,-1.0);
   if (!twolists_) {
+    neighbors_.resize(nlist0_);
     // Construct linked list and assign head of chain
     bins.resize(nlist0_);
     for(unsigned int i=0;i<nlist0_;i+=1) {
@@ -175,14 +164,74 @@ void NeighborListParallel::updateFullListWithLinkedList(const vector<Vector>& po
     // Calculate
     for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
+       Vector position_i=positions[i];
        unsigned atombinx, atombiny, atombinz, atombin;
        atombin = coord2bin(positions[i],atombinx, atombiny, atombinz);
        for(unsigned k=0; k < nstencil; k++) {
           // Loop over atoms in the k-th neighboring cell
           unsigned kbin = neighborCell(k,atombinx, atombiny, atombinz) ;
           for (int j = binhead[kbin]; j >= 0; j = bins[j]) {
-             double value=modulo2(distance(positions[i],positions[j]));
-             if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
+             double value=modulo2(distance(position_i,positions[j]));
+             if(value<=d2) neighbors_[i].push_back(j);
+          }
+       }
+    }
+  } else if (twolists_ && !do_pair_) {
+    neighbors_.resize(nlist0_+nlist1_);
+    // Construct linked list and assign head of chain
+    bins.resize(nlist1_);
+    for(unsigned int i=0;i<nlist1_;i++) {
+       unsigned ibin = coord2bin(positions[i+nlist0_]);
+       bins[i] = binhead[ibin];
+       binhead[ibin] = i;
+    }
+    // Calculate
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
+       local_atoms_.push_back(i);
+       Vector position_i=positions[i];
+       unsigned atombinx, atombiny, atombinz, atombin;
+       atombin = coord2bin(positions[i],atombinx, atombiny, atombinz);
+       for(unsigned k=0; k < nstencil; k++) {
+          // Loop over atoms in the k-th neighboring cell
+          unsigned kbin = neighborCell(k,atombinx, atombiny, atombinz) ;
+          for (int j = binhead[kbin]; j >= 0; j = bins[j]) {
+             double value=modulo2(distance(position_i,positions[j+nlist0_]));
+             if(value<=d2) {
+                neighbors_[i].push_back(j+nlist0_);
+                neighbors_[j+nlist0_].push_back(i);
+             }
+          }
+       }
+    }
+  }
+}
+
+void NeighborListParallel::updateHalfListWithLinkedList(const vector<Vector>& positions) {
+  const double d2=distance_*distance_;
+  neighbors_.resize(nlist0_);
+  // Set bin head of chain to -1.0
+  binhead = std::vector<int>(nbinx*nbiny*nbinz,-1.0);
+  if (!twolists_) {
+    // Construct linked list and assign head of chain
+    bins.resize(nlist0_);
+    for(unsigned int i=0;i<nlist0_;i+=1) {
+       unsigned ibin = coord2bin(positions[i]);
+       bins[i] = binhead[ibin];
+       binhead[ibin] = i;
+    }
+    // Calculate
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
+       local_atoms_.push_back(i);
+       Vector position_i=positions[i];
+       unsigned atombinx, atombiny, atombinz, atombin;
+       atombin = coord2bin(positions[i],atombinx, atombiny, atombinz);
+       for(unsigned k=0; k < nstencil; k++) {
+          // Loop over atoms in the k-th neighboring cell
+          unsigned kbin = neighborCell(k,atombinx, atombiny, atombinz) ;
+          for (int j = binhead[kbin]; j >= 0; j = bins[j]) {
+             if (j>=i) continue;
+             double value=modulo2(distance(position_i,positions[j]));
+             if(value<=d2) neighbors_[i].push_back(j);
           }
        }
     }
@@ -197,46 +246,20 @@ void NeighborListParallel::updateFullListWithLinkedList(const vector<Vector>& po
     // Calculate
     for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
+       Vector position_i=positions[i];
        unsigned atombinx, atombiny, atombinz, atombin;
        atombin = coord2bin(positions[i],atombinx, atombiny, atombinz);
        for(unsigned k=0; k < nstencil; k++) {
           // Loop over atoms in the k-th neighboring cell
           unsigned kbin = neighborCell(k,atombinx, atombiny, atombinz) ;
           for (int j = binhead[kbin]; j >= 0; j = bins[j]) {
-             double value=modulo2(distance(positions[i],positions[j+nlist0_]));
-             if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
+             double value=modulo2(distance(position_i,positions[j+nlist0_]));
+             if(value<=d2) {
+                neighbors_[i].push_back(j+nlist0_);
+             }
           }
        }
     }
-  }
-}
-
-void NeighborListParallel::updateHalfListWithLinkedList(const vector<Vector>& positions) {
-  const double d2=distance_*distance_;
-  // Set bin head of chain to -1.0
-  binhead = std::vector<int>(nbinx*nbiny*nbinz,-1.0);
-  if (twolists_) plumed_merror("updateHalfListWithLinkedList cannot be used with the twolists_ option");
-  // Construct linked list and assign head of chain
-  bins.resize(nlist0_);
-  for(unsigned int i=0;i<nlist0_;i+=1) {
-     unsigned ibin = coord2bin(positions[i]);
-     bins[i] = binhead[ibin];
-     binhead[ibin] = i;
-  }
-  // Calculate
-  for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
-     local_atoms_.push_back(i);
-     unsigned atombinx, atombiny, atombinz, atombin;
-     atombin = coord2bin(positions[i],atombinx, atombiny, atombinz);
-     for(unsigned k=0; k < nstencil; k++) {
-        // Loop over atoms in the k-th neighboring cell
-        unsigned kbin = neighborCell(k,atombinx, atombiny, atombinz) ;
-        for (int j = binhead[kbin]; j >= 0; j = bins[j]) {
-           if (j>=i) continue;
-           double value=modulo2(distance(positions[i],positions[j]));
-           if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
-        }
-     }
   }
 }
 
@@ -244,25 +267,36 @@ void NeighborListParallel::updateHalfListWithLinkedList(const vector<Vector>& po
 void NeighborListParallel::updateFullList(const vector<Vector>& positions) {
   const double d2=distance_*distance_;
   if (!twolists_) {
+    neighbors_.resize(nlist0_);
     for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
+       Vector position_i=positions[i];
        for(unsigned int j=0;j<nlist0_;j+=1) {
-          double value=modulo2(distance(positions[i],positions[j]));
-          if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
+          double value=modulo2(distance(position_i,positions[j]));
+          if(value<=d2) neighbors_[i].push_back(j);
        }
     }
   } else if(twolists_ && do_pair_) {
+    neighbors_.resize(nlist0_+nlist1_);
     for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
        double value=modulo2(distance(positions[i],positions[nlist0_+i]));
-       if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,nlist0_+i));
+       if(value<=d2) {
+          neighbors_[i].push_back(nlist0_+i);
+          neighbors_[nlist0_].push_back(i);
+       }
     }
   } else if (twolists_ && !do_pair_) {
+    neighbors_.resize(nlist0_+nlist1_);
     for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
+       Vector position_i=positions[i];
        for(unsigned int j=0;j<nlist1_;j+=1) {
-          double value=modulo2(distance(positions[i],positions[nlist0_+j]));
-          if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,nlist0_+j));
+          double value=modulo2(distance(position_i,positions[nlist0_+j]));
+          if(value<=d2) {
+             neighbors_[i].push_back(nlist0_+j);
+             neighbors_[nlist0_+j].push_back(i);
+          }
        }
     }
   }
@@ -270,14 +304,34 @@ void NeighborListParallel::updateFullList(const vector<Vector>& positions) {
 
 void NeighborListParallel::updateHalfList(const vector<Vector>& positions) {
   const double d2=distance_*distance_;
-  if (twolists_) plumed_merror("updateHalfList cannot be used with the twolists_ option");
-  for(unsigned int i=mpi_rank;i<(nlist0_-1);i+=mpi_stride) {
-     for(unsigned int j=i+1;j<nlist0_;j+=1) {
-        double value=modulo2(distance(positions[i],positions[j]));
-        if(value<=d2) neighbors_.push_back(pair<unsigned,unsigned>(i,j));
-     }
+  neighbors_.resize(nlist0_);
+  if (!twolists_) {
+    for(unsigned int i=mpi_rank;i<(nlist0_-1);i+=mpi_stride) {
+       local_atoms_.push_back(i);
+       Vector position_i=positions[i];
+       for(unsigned int j=i+1;j<nlist0_;j+=1) {
+          double value=modulo2(distance(position_i,positions[j]));
+          if(value<=d2) neighbors_[i].push_back(j);
+       }
+    }
+  } else if(twolists_ && do_pair_) {
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
+       local_atoms_.push_back(i);
+       double value=modulo2(distance(positions[i],positions[nlist0_+i]));
+       if(value<=d2) neighbors_[i].push_back(nlist0_+i);
+    }
+  } else if (twolists_ && !do_pair_) {
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
+       local_atoms_.push_back(i);
+       Vector position_i=positions[i];
+       for(unsigned int j=0;j<nlist1_;j++) {
+          double value=modulo2(distance(position_i,positions[nlist0_+j]));
+          if(value<=d2) {
+             neighbors_[i].push_back(nlist0_+j);
+          }
+       }
+    }
   }
-  
 }
 
 void NeighborListParallel::gatherStats(const vector<Vector>& positions) {
@@ -287,7 +341,10 @@ void NeighborListParallel::gatherStats(const vector<Vector>& positions) {
   }
   firsttime_=false;
   numberOfBuilds_++;
-  unsigned neighNum = neighbors_.size();
+  unsigned neighNum=0;
+  for(unsigned int i=0;i<nlist0_;i++) {
+     neighNum += neighbors_[i].size();
+  }
   unsigned allNeighNum=0;
   std::vector<unsigned> neighbors_ranks_(mycomm.Get_size());
   mycomm.Allgather(&neighNum,1,&neighbors_ranks_[0],1);
@@ -320,20 +377,18 @@ void NeighborListParallel::setLastUpdate(unsigned step) {
   lastupdate_=step;
 }
 
+// This function is obsolete and should be changed
 unsigned NeighborListParallel::size() const {
   return neighbors_.size();
 }
 
+// This function is obsolete and should be changed
 pair<unsigned,unsigned> NeighborListParallel::getClosePair(unsigned i) const {
-  return neighbors_[i];
+  return pair<unsigned,unsigned>(i,i);
 }
 
 vector<unsigned> NeighborListParallel::getNeighbors(unsigned index) {
-  vector<unsigned> neighbors;
-  for(unsigned int i=0; i<size(); ++i) {
-    if(neighbors_[i].first==index)  neighbors.push_back(neighbors_[i].second);
-  }
-  return neighbors;
+  return neighbors_[index];
 }
 
 Vector NeighborListParallel::distance(const Vector& position1, const Vector& position2) {

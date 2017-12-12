@@ -71,16 +71,19 @@ class PairEntropyMulticomp : public Colvar {
   bool serial;
   bool do_pairs;
   bool doneigh;
-  NeighborListParallel *nl;
-  bool invalidateList;
-  bool firsttime;
+  bool do_ignore_bb;
+  NeighborListParallel *nlAA, *nlBB, *nlAB;
+  bool invalidateListAA, invalidateListAB, invalidateListBB;
+  bool firsttimeAA, firsttimeAB, firsttimeBB;
+  vector<AtomNumber> ga_lista,gb_lista,full_lista;
   double maxr, sigma;
   unsigned nhist;
   double rcut2;
-  double invSqrt2piSigma, sigmaSqr2, sigmaSqr;
+  double invSqrt2piSigma, sigmaSqr2, sigmaSqr, invNormKernel;
   double deltar;
   unsigned deltaBin;
   unsigned numberOfAatoms, numberOfBatoms;
+  std::vector<double> vectorX, vectorX2;
   // Integration routines
   double integrate(vector<double> integrand, double delta)const;
   Vector integrate(vector<Vector> integrand, double delta)const;
@@ -112,6 +115,7 @@ void PairEntropyMulticomp::registerKeywords( Keywords& keys ){
   keys.addFlag("INDIVIDUAL_PAIRS",false,"Obtain pair entropy of AA, AB, and BB pairs");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r) of AA, AB, and BB pairs");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand of AA, AB, and BB pairs");
+  keys.addFlag("IGNORE_BB",false,"Output integrand of AA, AB, and BB pairs");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbour list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list. If non specified or negative, it checks every step and rebuilds as needed.");
@@ -132,13 +136,16 @@ PLUMED_COLVAR_INIT(ao),
 pbc(true),
 serial(false),
 do_pairs(false),
-invalidateList(true),
-firsttime(true)
+invalidateListAA(true),
+invalidateListAB(true),
+invalidateListBB(true),
+firsttimeAA(true),
+firsttimeAB(true),
+firsttimeBB(true)
 {
 
   parseFlag("SERIAL",serial);
 
-  vector<AtomNumber> ga_lista,gb_lista,full_lista;
   parseAtomList("GROUPA",ga_lista);
   parseAtomList("GROUPB",gb_lista);
 
@@ -148,6 +155,8 @@ firsttime(true)
 
 // neighbor list stuff
   doneigh=false;
+  bool nl_full_list=false;
+  bool do_pair=false;
   double nl_cut=0.0;
   int nl_st=-1;
   double nl_skin;
@@ -200,17 +209,6 @@ firsttime(true)
     error("The group of atoms GROUPB has not been specified");
   }
 
-  if (doneigh) {
-     nl= new NeighborListParallel(full_lista,pbc,getPbc(),comm,log,nl_cut,nl_st,nl_skin);
-     log.printf("  using neighbor lists with\n");
-     log.printf("  cutoff %f, and skin %f\n",nl_cut,nl_skin);
-     if(nl_st>=0){
-       log.printf("  update every %d steps\n",nl_st);
-     } else {
-       log.printf("  checking every step for dangerous builds and rebuilding as needed\n");
-     }
-  }
-
   requestAtoms(full_lista);
  
   doOutputGofr=false;
@@ -236,7 +234,26 @@ firsttime(true)
   parseFlag("INDIVIDUAL_PAIRS",do_pairs);
   if (do_pairs) log.printf("  The AA, AB, and BB contributions will be computed separately \n");
 
+  do_ignore_bb=false;
+  parseFlag("IGNORE_BB",do_ignore_bb);
+  if (do_ignore_bb) log.printf("  The BB term will be ignored \n");
+
   checkRead();
+
+  if (doneigh) {
+     //nl= new NeighborListParallel(full_lista,pbc,getPbc(),comm,log,nl_cut,nl_st,nl_skin);
+     nlAA = new NeighborListParallel(ga_lista,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
+     nlAB = new NeighborListParallel(ga_lista,gb_lista,do_pair,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
+     nlBB = new NeighborListParallel(gb_lista,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
+     log.printf("  using neighbor lists with\n");
+     log.printf("  cutoff %f, and skin %f\n",nl_cut,nl_skin);
+     if(nl_st>=0){
+       log.printf("  update every %d steps\n",nl_st);
+     } else {
+       log.printf("  checking every step for dangerous builds and rebuilding as needed\n");
+     }
+  }
+
 
   // Define heavily used expressions
   double sqrt2piSigma = std::sqrt(2*pi)*sigma;
@@ -245,6 +262,13 @@ firsttime(true)
   sigmaSqr = sigma*sigma;
   deltar=maxr/nhist;
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
+
+  vectorX.resize(nhist);
+  vectorX2.resize(nhist);
+  for(unsigned i=0;i<nhist;++i){
+    vectorX[i]=deltar*i;
+    vectorX2[i]=vectorX[i]*vectorX[i];
+  }
 
   // Define output components
   if (do_pairs) {
@@ -259,22 +283,56 @@ firsttime(true)
 
 PairEntropyMulticomp::~PairEntropyMulticomp(){
   if (doneigh) {
-     nl->printStats();
-     delete nl;
+     nlAA->printStats();
+     nlAB->printStats();
+     if (!do_ignore_bb) nlBB->printStats();
+     delete nlAA;
+     delete nlAB;
+     delete nlBB;
   }
 }
 
 void PairEntropyMulticomp::prepare(){
-  if(doneigh && nl->getStride()>0){
-    if(firsttime) {
-      invalidateList=true;
-      firsttime=false;
-    } else if ( (nl->getStride()>=0) &&  (getStep()%nl->getStride()==0) ){
-      invalidateList=true;
-    } else if ( (nl->getStride()<0) && !(nl->isListStillGood(getPositions())) ){
-      invalidateList=true;
+  if(doneigh && nlAA->getStride()>0){
+    if(firsttimeAA) {
+      invalidateListAA=true;
+      firsttimeAA=false;
+    } else if ( (nlAA->getStride()>=0) &&  (getStep()%nlAA->getStride()==0) ){
+      invalidateListAA=true;
+    /*
+    } else if ( (nlAA->getStride()<0) && !(nlAA->isListStillGood(getPositions())) ){
+      invalidateListAA=true;
+    */
     } else {
-      invalidateList=false;
+      invalidateListAA=false;
+    }
+  }
+  if(doneigh && nlAB->getStride()>0){
+    if(firsttimeAB) {
+      invalidateListAB=true;
+      firsttimeAB=false;
+    } else if ( (nlAB->getStride()>=0) &&  (getStep()%nlAB->getStride()==0) ){
+      invalidateListAB=true;
+    /*
+    } else if ( (nlAB->getStride()<0) && !(nlAB->isListStillGood(getPositions())) ){
+      invalidateListAB=true;
+    */
+    } else {
+      invalidateListAB=false;
+    }
+  }
+  if(!do_ignore_bb && doneigh && nlBB->getStride()>0){
+    if(firsttimeBB) {
+      invalidateListBB=true;
+      firsttimeBB=false;
+    } else if ( (nlBB->getStride()>=0) &&  (getStep()%nlBB->getStride()==0) ){
+      invalidateListBB=true;
+    /*
+    } else if ( (nlBB->getStride()<0) && !(nlBB->isListStillGood(getPositions())) ){
+      invalidateListBB=true;
+    */
+    } else {
+      invalidateListBB=false;
     }
   }
 }
@@ -287,25 +345,28 @@ void PairEntropyMulticomp::calculate()
   vector<Vector> derivAA(getNumberOfAtoms());
   vector<Vector> derivAB(getNumberOfAtoms());
   vector<Vector> derivBB(getNumberOfAtoms());
-  //Tensor virial;
-  //if (do_pairs){
-  //  Tensor virialAA;
-  //  Tensor virialAB;
-  //  Tensor virialBB;
-  //}
   // Define intermediate quantities
   vector<double> gofrAA(nhist);
   vector<double> gofrAB(nhist);
   vector<double> gofrBB(nhist);
-  vector<double> logGofrAA(nhist);
-  vector<double> logGofrAB(nhist);
-  vector<double> logGofrBB(nhist);
   Matrix<Vector> gofrPrimeAA(nhist,getNumberOfAtoms());
   Matrix<Vector> gofrPrimeAB(nhist,getNumberOfAtoms());
   Matrix<Vector> gofrPrimeBB(nhist,getNumberOfAtoms());
   vector<Tensor> gofrVirialAA(nhist);
   vector<Tensor> gofrVirialAB(nhist);
   vector<Tensor> gofrVirialBB(nhist);
+  // Calculate volume and density
+  double volume=getBox().determinant();
+  double density=getNumberOfAtoms()/volume; // This is (NA+NB)/V
+  double densityA=numberOfAatoms/volume; // This is NA/V
+  double densityB=numberOfBatoms/volume; // This is NB/V
+  // Normalization of g(r)s
+  double normConstantBaseAA = 2*pi*density*numberOfAatoms*(numberOfAatoms-1) / getNumberOfAtoms();
+  double normConstantBaseAB = 4*pi*density*numberOfAatoms*numberOfBatoms / getNumberOfAtoms();
+  double normConstantBaseBB = 2*pi*density*numberOfBatoms*(numberOfBatoms-1) / getNumberOfAtoms();
+  double invNormConstantBaseAA = invSqrt2piSigma/normConstantBaseAA;
+  double invNormConstantBaseAB = invSqrt2piSigma/normConstantBaseAB;
+  double invNormConstantBaseBB = invSqrt2piSigma/normConstantBaseBB;
   // Setup parallelization
   unsigned stride=comm.Get_size();
   unsigned rank=comm.Get_rank();
@@ -317,71 +378,149 @@ void PairEntropyMulticomp::calculate()
     rank=comm.Get_rank();
   }
   if (doneigh) {
-     if(invalidateList){
-        nl->update(getPositions());
+     if(invalidateListAA){
+        vector<Vector> a_positions(getPositions().begin(),getPositions().begin() + ga_lista.size());
+        nlAA->update(a_positions);
      }
-     // Loop over neighbors
-     const unsigned nn=nl->size();
-     for(unsigned int i=rank;i<nn;i+=stride) {
-       double dfunc, d2;
-       Vector distance;
-       Vector distance_versor;
-       unsigned i0=nl->getClosePair(i).first;
-       unsigned i1=nl->getClosePair(i).second;
-       if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-       if(pbc){
-        distance=pbcDistance(getPosition(i0),getPosition(i1));
-       } else {
-        distance=delta(getPosition(i0),getPosition(i1));
-       }
-       if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-         double distanceModulo=std::sqrt(d2);
-         Vector distance_versor = distance / distanceModulo;
-         unsigned bin=std::floor(distanceModulo/deltar);
-         int minBin, maxBin; // These cannot be unsigned
-         // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-         minBin=bin - deltaBin;
-         if (minBin < 0) minBin=0;
-         if (minBin > (nhist-1)) minBin=nhist-1;
-         maxBin=bin +  deltaBin;
-         if (maxBin > (nhist-1)) maxBin=nhist-1;
-         for(int k=minBin;k<maxBin+1;k+=1) {
-           double x=deltar*(k+0.5);
-           // To which gofr does this pair of atoms contribute?
-           if (i0<numberOfAatoms && i1<numberOfAatoms) {
-              // AA case
-              gofrAA[k] += kernel(x-distanceModulo, dfunc);
+     if(invalidateListAB){
+        nlAB->update(getPositions());
+     }
+     if(!do_ignore_bb && invalidateListBB){
+        vector<Vector> b_positions(getPositions().begin() + ga_lista.size(), getPositions().end() );
+        nlBB->update(b_positions);
+     }
+    // Loop over A atoms
+    for(unsigned int i=0;i<nlAA->getNumberOfLocalAtoms();i++) {
+       std::vector<unsigned> neighbors;
+       unsigned index=nlAA->getIndexOfLocalAtom(i);
+       neighbors=nlAA->getNeighbors(index);
+       // Loop over A type neighbors
+       for(unsigned int j=0;j<neighbors.size();j++) {  
+          double dfunc, d2;
+          Vector distance;
+          Vector distance_versor;
+          unsigned i0=index;
+          unsigned i1=neighbors[j];
+          if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+          if(pbc){
+           distance=pbcDistance(getPosition(i0),getPosition(i1));
+          } else {
+           distance=delta(getPosition(i0),getPosition(i1));
+          }
+          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+            //if (index==200) std::cout  << "NL: " << neighbors[j] << "\n";
+            double distanceModulo=std::sqrt(d2);
+            Vector distance_versor = distance / distanceModulo;
+            unsigned bin=std::floor(distanceModulo/deltar);
+            int minBin, maxBin; // These cannot be unsigned
+            // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+            minBin=bin - deltaBin;
+            if (minBin < 0) minBin=0;
+            if (minBin > (nhist-1)) minBin=nhist-1;
+            maxBin=bin +  deltaBin;
+            if (maxBin > (nhist-1)) maxBin=nhist-1;
+            for(int k=minBin;k<maxBin+1;k+=1) {
+              invNormKernel=invNormConstantBaseAA/vectorX2[k];
+              gofrAA[k] += kernel(vectorX[k]-distanceModulo, dfunc);
               if (!doNotCalculateDerivatives()) {
                  Vector value = dfunc * distance_versor;
                  gofrPrimeAA[k][i0] += value;
                  gofrPrimeAA[k][i1] -= value;
                  Tensor vv(value, distance);
                  gofrVirialAA[k] += vv;
-              }
-         } else if ((i0>numberOfAatoms && i1>numberOfAatoms)) {
-              // BB case
-              gofrBB[k] += kernel(x-distanceModulo, dfunc);
-              if (!doNotCalculateDerivatives()) {
-                 Vector value = dfunc * distance_versor;
-                 gofrPrimeBB[k][i0] += value;
-                 gofrPrimeBB[k][i1] -= value;
-                 Tensor vv(value, distance);
-                 gofrVirialBB[k] += vv;
-              }
-         } else {
-              // AB or BA case
-              gofrAB[k] += kernel(x-distanceModulo, dfunc);
+              }      
+            }
+          }
+       }
+    }
+    if (!do_ignore_bb) {
+       // Loop over B atoms
+       for(unsigned int i=0;i<nlBB->getNumberOfLocalAtoms();i++) {
+          std::vector<unsigned> neighbors;
+          unsigned index=nlBB->getIndexOfLocalAtom(i);
+          neighbors=nlBB->getNeighbors(index);
+          // Loop over B type neighbors
+          for(unsigned int j=0;j<neighbors.size();j++) {  
+             double dfunc, d2;
+             Vector distance;
+             Vector distance_versor;
+             unsigned i0=index+ga_lista.size();
+             unsigned i1=neighbors[j]+ga_lista.size();
+             if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+             if(pbc){
+              distance=pbcDistance(getPosition(i0),getPosition(i1));
+             } else {
+              distance=delta(getPosition(i0),getPosition(i1));
+             }
+             if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+               double distanceModulo=std::sqrt(d2);
+               Vector distance_versor = distance / distanceModulo;
+               unsigned bin=std::floor(distanceModulo/deltar);
+               int minBin, maxBin; // These cannot be unsigned
+               // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+               minBin=bin - deltaBin;
+               if (minBin < 0) minBin=0;
+               if (minBin > (nhist-1)) minBin=nhist-1;
+               maxBin=bin +  deltaBin;
+               if (maxBin > (nhist-1)) maxBin=nhist-1;
+               for(int k=minBin;k<maxBin+1;k+=1) {
+                 invNormKernel=invNormConstantBaseBB/vectorX2[k];
+                 gofrBB[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+                 if (!doNotCalculateDerivatives()) {
+                    Vector value = dfunc * distance_versor;
+                    gofrPrimeBB[k][i0] += value;
+                    gofrPrimeBB[k][i1] -= value;
+                    Tensor vv(value, distance);
+                    gofrVirialBB[k] += vv;
+                 }      
+               }
+             }
+          }
+       }
+    }
+    // Loop over A atoms
+    for(unsigned int i=0;i<nlAB->getNumberOfLocalAtoms();i++) {
+       std::vector<unsigned> neighbors;
+       unsigned index=nlAB->getIndexOfLocalAtom(i);
+       neighbors=nlAB->getNeighbors(index);
+       // Loop over B type neighbors
+       for(unsigned int j=0;j<neighbors.size();j++) {  
+          double dfunc, d2;
+          Vector distance;
+          Vector distance_versor;
+          unsigned i0=index;
+          unsigned i1=neighbors[j];
+          if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
+          if(pbc){
+           distance=pbcDistance(getPosition(i0),getPosition(i1));
+          } else {
+           distance=delta(getPosition(i0),getPosition(i1));
+          }
+          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+            double distanceModulo=std::sqrt(d2);
+            Vector distance_versor = distance / distanceModulo;
+            unsigned bin=std::floor(distanceModulo/deltar);
+            int minBin, maxBin; // These cannot be unsigned
+            // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+            minBin=bin - deltaBin;
+            if (minBin < 0) minBin=0;
+            if (minBin > (nhist-1)) minBin=nhist-1;
+            maxBin=bin +  deltaBin;
+            if (maxBin > (nhist-1)) maxBin=nhist-1;
+            for(int k=minBin;k<maxBin+1;k+=1) {
+              invNormKernel=invNormConstantBaseAB/vectorX2[k];
+              gofrAB[k] += kernel(vectorX[k]-distanceModulo, dfunc);
               if (!doNotCalculateDerivatives()) {
                  Vector value = dfunc * distance_versor;
                  gofrPrimeAB[k][i0] += value;
                  gofrPrimeAB[k][i1] -= value;
                  Tensor vv(value, distance);
                  gofrVirialAB[k] += vv;
-              }
-         }
-         }
+              }      
+            }
+          }
        }
-     }
+    }
   } else {
      // Loop over pairs
      for(unsigned int i=rank;i<(getNumberOfAtoms()-1);i+=stride) {
@@ -406,12 +545,13 @@ void PairEntropyMulticomp::calculate()
              if (minBin > (nhist-1)) minBin=nhist-1;
              maxBin=bin +  deltaBin;
              if (maxBin > (nhist-1)) maxBin=nhist-1;
+             //if (i==200 && j<numberOfAatoms) std::cout << "NO: " << j << "\n";
              for(int k=minBin;k<maxBin+1;k+=1) {
-               double x=deltar*(k+0.5);
                // To which gofr does this pair of atoms contribute?
                if (i<numberOfAatoms && j<numberOfAatoms) {
                   // AA case
-                  gofrAA[k] += kernel(x-distanceModulo, dfunc);
+                  invNormKernel=invNormConstantBaseAA/vectorX2[k];
+                  gofrAA[k] += kernel(vectorX[k]-distanceModulo, dfunc);
                   if (!doNotCalculateDerivatives()) {
                      Vector value = dfunc * distance_versor;
                      gofrPrimeAA[k][i] += value;
@@ -419,19 +559,23 @@ void PairEntropyMulticomp::calculate()
                      Tensor vv(value, distance);
                      gofrVirialAA[k] += vv;
                   }
-             } else if ((i>numberOfAatoms && j>numberOfAatoms)) {
-                  // BB case
-                  gofrBB[k] += kernel(x-distanceModulo, dfunc);
-                  if (!doNotCalculateDerivatives()) {
-                     Vector value = dfunc * distance_versor;
-                     gofrPrimeBB[k][i] += value;
-                     gofrPrimeBB[k][j] -= value;
-                     Tensor vv(value, distance);
-                     gofrVirialBB[k] += vv;
+             } else if (i>=numberOfAatoms && j>=numberOfAatoms) {
+                  if (!do_ignore_bb) {
+                     // BB case
+                     invNormKernel=invNormConstantBaseBB/vectorX2[k];
+                     gofrBB[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+                     if (!doNotCalculateDerivatives()) {
+                        Vector value = dfunc * distance_versor;
+                        gofrPrimeBB[k][i] += value;
+                        gofrPrimeBB[k][j] -= value;
+                        Tensor vv(value, distance);
+                        gofrVirialBB[k] += vv;
+                     }
                   }
              } else {
                   // AB or BA case
-                  gofrAB[k] += kernel(x-distanceModulo, dfunc);
+                  invNormKernel=invNormConstantBaseAB/vectorX2[k];
+                  gofrAB[k] += kernel(vectorX[k]-distanceModulo, dfunc);
                   if (!doNotCalculateDerivatives()) {
                      Vector value = dfunc * distance_versor;
                      gofrPrimeAB[k][i] += value;
@@ -447,26 +591,18 @@ void PairEntropyMulticomp::calculate()
   }
   if(!serial){
     comm.Sum(&gofrAA[0],nhist);
-    comm.Sum(&gofrBB[0],nhist);
+    if (!do_ignore_bb) comm.Sum(&gofrBB[0],nhist);
     comm.Sum(&gofrAB[0],nhist);
     if (!doNotCalculateDerivatives()) {
        comm.Sum(&gofrPrimeAA[0][0],nhist*getNumberOfAtoms());
-       comm.Sum(&gofrPrimeBB[0][0],nhist*getNumberOfAtoms());
+       if (!do_ignore_bb) comm.Sum(&gofrPrimeBB[0][0],nhist*getNumberOfAtoms());
        comm.Sum(&gofrPrimeAB[0][0],nhist*getNumberOfAtoms());
        comm.Sum(&gofrVirialAA[0],nhist);
-       comm.Sum(&gofrVirialBB[0],nhist);
+       if (!do_ignore_bb) comm.Sum(&gofrVirialBB[0],nhist);
        comm.Sum(&gofrVirialAB[0],nhist);
     }
   }
-  // Calculate volume and density
-  double volume=getBox().determinant();
-  double density=getNumberOfAtoms()/volume; // This is (NA+NB)/V
-  double densityA=numberOfAatoms/volume; // This is NA/V
-  double densityB=numberOfBatoms/volume; // This is NB/V
-  // Normalize g(r)s
-  double normConstantBaseAA = 2*pi*density*numberOfAatoms*(numberOfAatoms-1) / getNumberOfAtoms();
-  double normConstantBaseAB = 4*pi*density*numberOfAatoms*numberOfBatoms / getNumberOfAtoms();
-  double normConstantBaseBB = 2*pi*density*numberOfBatoms*(numberOfBatoms-1) / getNumberOfAtoms();
+  /*
   for(unsigned j=0;j<nhist;++j){
     double x=deltar*(j+0.5);
     double normConstantAA = normConstantBaseAA*x*x;
@@ -474,43 +610,48 @@ void PairEntropyMulticomp::calculate()
     double normConstantBB = normConstantBaseBB*x*x;
     gofrAA[j] /= normConstantAA;
     gofrAB[j] /= normConstantAB;
-    gofrBB[j] /= normConstantBB;
+    if (!do_ignore_bb) gofrBB[j] /= normConstantBB;
     if (!doNotCalculateDerivatives()) {
        gofrVirialAA[j] /= normConstantAA;
        gofrVirialAB[j] /= normConstantAB;
-       gofrVirialBB[j] /= normConstantBB;
+       if (!do_ignore_bb) gofrVirialBB[j] /= normConstantBB;
        for(unsigned k=0;k<getNumberOfAtoms();++k){
          gofrPrimeAA[j][k] /= normConstantAA;
          gofrPrimeAB[j][k] /= normConstantAB;
-         gofrPrimeBB[j][k] /= normConstantBB;
+         if (!do_ignore_bb) gofrPrimeBB[j][k] /= normConstantBB;
        }
     }
   }
+  */
   // Output of gofrs
   if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofrAA,gofrAB,gofrBB);
   // Construct integrands
   vector<double> integrandAA(nhist);
   vector<double> integrandAB(nhist);
   vector<double> integrandBB(nhist);
+  vector<double> logGofrAAx2(nhist);
+  vector<double> logGofrABx2(nhist);
+  vector<double> logGofrBBx2(nhist);
   for(unsigned j=0;j<nhist;++j){
-    double x=deltar*(j+0.5);
-    logGofrAA[j] = std::log(gofrAA[j]);
-    logGofrAB[j] = std::log(gofrAB[j]);
-    logGofrBB[j] = std::log(gofrBB[j]);
+    logGofrAAx2[j] = std::log(gofrAA[j])*vectorX2[j];
+    logGofrABx2[j] = std::log(gofrAB[j])*vectorX2[j];
+    logGofrBBx2[j] = std::log(gofrBB[j])*vectorX2[j];
     if (gofrAA[j]<1.e-10) {
-      integrandAA[j] = x*x;
+      integrandAA[j] = vectorX2[j];
     } else {
-      integrandAA[j] = (gofrAA[j]*logGofrAA[j]-gofrAA[j]+1)*x*x;
+      integrandAA[j] = (gofrAA[j]*logGofrAAx2[j])+(-gofrAA[j]+1)*vectorX2[j];
     }
     if (gofrAB[j]<1.e-10) {
-      integrandAB[j] = x*x;
+      integrandAB[j] = vectorX2[j];
     } else {
-      integrandAB[j] = (gofrAB[j]*logGofrAB[j]-gofrAB[j]+1)*x*x;
+      integrandAB[j] = (gofrAB[j]*logGofrABx2[j])+(-gofrAB[j]+1)*vectorX2[j];
     }
-    if (gofrBB[j]<1.e-10) {
-      integrandBB[j] = x*x;
-    } else {
-      integrandBB[j] = (gofrBB[j]*logGofrBB[j]-gofrBB[j]+1)*x*x;
+    if (!do_ignore_bb) {
+       if (gofrBB[j]<1.e-10) {
+         integrandBB[j] = vectorX2[j];
+       } else {
+         integrandBB[j] = (gofrBB[j]*logGofrBBx2[j])+(-gofrBB[j]+1)*vectorX2[j];
+       }
     }
   }
   // Output of integrands
@@ -521,7 +662,9 @@ void PairEntropyMulticomp::calculate()
   double prefactorBB = -2*pi*(densityB*densityB/density);
   double pairAAvalue =  prefactorAA*integrate(integrandAA,deltar);
   double pairABvalue = prefactorAB*integrate(integrandAB,deltar);
-  double pairBBvalue = prefactorBB*integrate(integrandBB,deltar);
+  double pairBBvalue;
+  if (!do_ignore_bb) pairBBvalue = prefactorBB*integrate(integrandBB,deltar);
+  else pairBBvalue = 0.;
   // Output individual pairs or only full pair entropy
   if (do_pairs) {
     Value* pairAA=getPntrToComponent("pairAA");
@@ -543,19 +686,18 @@ void PairEntropyMulticomp::calculate()
       vector<Vector> integrandDerivativesAB(nhist);
       vector<Vector> integrandDerivativesBB(nhist);
       for(unsigned k=0;k<nhist;++k){
-        double x=deltar*(k+0.5);
-        if (gofrAA[k]>1.e-10) { integrandDerivativesAA[k] = gofrPrimeAA[k][j]*logGofrAA[k]*x*x; }
-        if (gofrAB[k]>1.e-10) { integrandDerivativesAB[k] = gofrPrimeAB[k][j]*logGofrAB[k]*x*x; }
-        if (gofrBB[k]>1.e-10) { integrandDerivativesBB[k] = gofrPrimeBB[k][j]*logGofrBB[k]*x*x; }
+        if (gofrAA[k]>1.e-10) { integrandDerivativesAA[k] = gofrPrimeAA[k][j]*logGofrAAx2[k]; }
+        if (gofrAB[k]>1.e-10) { integrandDerivativesAB[k] = gofrPrimeAB[k][j]*logGofrABx2[k]; }
+        if (!do_ignore_bb && gofrBB[k]>1.e-10) { integrandDerivativesBB[k] = gofrPrimeBB[k][j]*logGofrBBx2[k]; }
       }
       derivAA[j] =  prefactorAA*integrate(integrandDerivativesAA,deltar);
       derivAB[j] =  prefactorAB*integrate(integrandDerivativesAB,deltar);
-      derivBB[j] =  prefactorBB*integrate(integrandDerivativesBB,deltar);
+      if (!do_ignore_bb) derivBB[j] =  prefactorBB*integrate(integrandDerivativesBB,deltar);
     }
     if(!serial){
        comm.Sum(&derivAA[0][0],3*getNumberOfAtoms());
        comm.Sum(&derivAB[0][0],3*getNumberOfAtoms());
-       comm.Sum(&derivBB[0][0],3*getNumberOfAtoms());
+       if (!do_ignore_bb) comm.Sum(&derivBB[0][0],3*getNumberOfAtoms());
     }
     if (do_pairs) {
       Value* pairAA=getPntrToComponent("pairAA");
@@ -575,30 +717,29 @@ void PairEntropyMulticomp::calculate()
     vector<Tensor> integrandVirialAB(nhist);
     vector<Tensor> integrandVirialBB(nhist);
     for(unsigned j=0;j<nhist;++j){
-      double x=deltar*(j+0.5);
-      if (gofrAA[j]>1.e-10) { integrandVirialAA[j] = gofrVirialAA[j]*logGofrAA[j]*x*x ;}
-      if (gofrAB[j]>1.e-10) { integrandVirialAB[j] = gofrVirialAB[j]*logGofrAB[j]*x*x ;}
-      if (gofrBB[j]>1.e-10) { integrandVirialBB[j] = gofrVirialBB[j]*logGofrBB[j]*x*x ;}
+      if (gofrAA[j]>1.e-10) { integrandVirialAA[j] = gofrVirialAA[j]*logGofrAAx2[j];}
+      if (gofrAB[j]>1.e-10) { integrandVirialAB[j] = gofrVirialAB[j]*logGofrABx2[j];}
+      if (!do_ignore_bb && gofrBB[j]>1.e-10) { integrandVirialBB[j] = gofrVirialBB[j]*logGofrBBx2[j];}
     }
     // Integrate virial
     Tensor virialAA = prefactorAA*integrate(integrandVirialAA,deltar);
     Tensor virialAB = prefactorAB*integrate(integrandVirialAB,deltar);
-    Tensor virialBB = prefactorBB*integrate(integrandVirialBB,deltar);
+    Tensor virialBB;
+    if (!do_ignore_bb) virialBB=prefactorBB*integrate(integrandVirialBB,deltar);
     // Virial of volume
     // Construct virial integrand
     vector<double> integrandVirialVolumeAA(nhist);
     vector<double> integrandVirialVolumeAB(nhist);
     vector<double> integrandVirialVolumeBB(nhist);
     for(unsigned j=0;j<nhist;j+=1) {
-      double x=deltar*(j+0.5);
-      integrandVirialVolumeAA[j] = (-gofrAA[j]+1)*x*x;
-      integrandVirialVolumeAB[j] = (-gofrAB[j]+1)*x*x;
-      integrandVirialVolumeBB[j] = (-gofrBB[j]+1)*x*x;
+      integrandVirialVolumeAA[j] = (-gofrAA[j]+1)*vectorX2[j];
+      integrandVirialVolumeAB[j] = (-gofrAB[j]+1)*vectorX2[j];
+      if (!do_ignore_bb) integrandVirialVolumeBB[j] = (-gofrBB[j]+1)*vectorX2[j];
     }
     // Integrate virial
     virialAA += prefactorAA*integrate(integrandVirialVolumeAA,deltar)*Tensor::identity();
     virialAB += prefactorAB*integrate(integrandVirialVolumeAB,deltar)*Tensor::identity();
-    virialBB += prefactorBB*integrate(integrandVirialVolumeBB,deltar)*Tensor::identity();
+    if (!do_ignore_bb) virialBB += prefactorBB*integrate(integrandVirialVolumeBB,deltar)*Tensor::identity();
     // Set virial
     if (do_pairs) {
       Value* pairAA=getPntrToComponent("pairAA");
@@ -617,7 +758,8 @@ void PairEntropyMulticomp::calculate()
 
 double PairEntropyMulticomp::kernel(double distance,double&der)const{
   // Gaussian function and derivative
-  double result = invSqrt2piSigma*std::exp(-distance*distance/sigmaSqr2) ;
+  //double result = invSqrt2piSigma*std::exp(-distance*distance/sigmaSqr2) ;
+  double result = invNormKernel*std::exp(-distance*distance/sigmaSqr2) ;
   der = -distance*result/sigmaSqr;
   return result;
 }
@@ -660,8 +802,7 @@ Tensor PairEntropyMulticomp::integrate(vector<Tensor> integrand, double delta)co
 
 void PairEntropyMulticomp::outputGofr(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
   for(unsigned i=0;i<gofrAA.size();++i){
-     double r=deltar*(i+0.5);
-     gofrOfile.printField("r",r).printField("gofrAA",gofrAA[i]).printField("gofrAB",gofrAB[i]).printField("gofrBB",gofrBB[i]).printField();
+     gofrOfile.printField("r",vectorX[i]).printField("gofrAA",gofrAA[i]).printField("gofrAB",gofrAB[i]).printField("gofrBB",gofrBB[i]).printField();
   }
   gofrOfile.printf("\n");
   gofrOfile.printf("\n");
@@ -669,8 +810,7 @@ void PairEntropyMulticomp::outputGofr(vector<double> gofrAA, vector<double> gofr
 
 void PairEntropyMulticomp::outputIntegrand(vector<double> gofrAA, vector<double> gofrAB, vector<double> gofrBB) {
   for(unsigned i=0;i<gofrAA.size();++i){
-     double r=deltar*(i+0.5);
-     integrandOfile.printField("r",r).printField("integrandAA",gofrAA[i]).printField("integrandAB",gofrAB[i]).printField("integrandBB",gofrBB[i]).printField();
+     integrandOfile.printField("r",vectorX[i]).printField("integrandAA",gofrAA[i]).printField("integrandAB",gofrAB[i]).printField("integrandBB",gofrBB[i]).printField();
   }
   integrandOfile.printf("\n");
   integrandOfile.printf("\n");

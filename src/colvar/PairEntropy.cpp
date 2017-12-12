@@ -145,11 +145,7 @@ firsttime(true)
 
   parseAtomList("ATOMS",atoms_lista);
 
-  bool nopbc=!pbc;
-  parseFlag("NOPBC",nopbc);
-  pbc=!nopbc;
-  if(pbc) log.printf("  using periodic boundary conditions\n");
-  else    log.printf("  without periodic boundary conditions\n");
+  log.printf("  using periodic boundary conditions\n");
 
 // neighbor list stuff
   doneigh=false;
@@ -336,44 +332,41 @@ void PairEntropy::calculate()
     if(invalidateList){
       nl->update(getPositions());
     }
-    // Loop over neighbors
-    // Each thread has its own neighbors so there's no need to parallelize here
-    const unsigned nn=nl->size();
-    for(unsigned int i=0;i<nn;i+=1) {
-      double dfunc, d2;
-      Vector distance;
-      Vector distance_versor;
-      unsigned i0=nl->getClosePair(i).first;
-      unsigned i1=nl->getClosePair(i).second;
-      if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-      if(pbc){
-       distance=pbcDistance(getPosition(i0),getPosition(i1));
-      } else {
-       distance=delta(getPosition(i0),getPosition(i1));
-      }
-      if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-        double distanceModulo=std::sqrt(d2);
-        Vector distance_versor = distance / distanceModulo;
-        unsigned bin=std::floor(distanceModulo/deltar);
-        int minBin, maxBin; // These cannot be unsigned
-        // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-        minBin=bin - deltaBin;
-        if (minBin < 0) minBin=0;
-        if (minBin > (nhist-1)) minBin=nhist-1;
-        maxBin=bin +  deltaBin;
-        if (maxBin > (nhist-1)) maxBin=nhist-1;
-        for(int k=minBin;k<maxBin+1;k+=1) {
-          invNormKernel=invNormConstantBase/vectorX2[k];
-          gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
-          if (!doNotCalculateDerivatives()) {
-             Vector value = dfunc * distance_versor;
-             gofrPrime[k][i0] += value;
-             gofrPrime[k][i1] -= value;
-             Tensor vv(value, distance);
-             gofrVirial[k] += vv;
-          }
-        }
-      }
+    // Loop over all atoms
+    for(unsigned int i=0;i<nl->getNumberOfLocalAtoms();i++) {
+       std::vector<unsigned> neighbors;
+       unsigned index=nl->getIndexOfLocalAtom(i);
+       neighbors=nl->getNeighbors(index);
+       // Loop over neighbors
+       for(unsigned int j=0;j<neighbors.size();j++) {  
+         unsigned neighbor=neighbors[j];
+         Vector distance=pbcDistance(getPosition(index),getPosition(neighbor));
+         double d2;
+         if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+           double distanceModulo=std::sqrt(d2);
+           Vector distance_versor = distance / distanceModulo;
+           unsigned bin=std::floor(distanceModulo/deltar);
+           int minBin, maxBin; // These cannot be unsigned
+           // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+           minBin=bin - deltaBin;
+           if (minBin < 0) minBin=0;
+           if (minBin > (nhist-1)) minBin=nhist-1;
+           maxBin=bin +  deltaBin;
+           if (maxBin > (nhist-1)) maxBin=nhist-1;
+           for(int k=minBin;k<maxBin+1;k+=1) {
+             invNormKernel=invNormConstantBase/vectorX2[k];
+             double dfunc;
+             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+             if (!doNotCalculateDerivatives()) {
+                Vector value = dfunc * distance_versor;
+                gofrPrime[k][index] += value;
+                gofrPrime[k][neighbor] -= value;
+                Tensor vv(value, distance);
+                gofrVirial[k] += vv;
+             }
+           }
+         }
+       }
     }
   } else if (doneigh && doLowComm) {
     if(invalidateList){
@@ -386,17 +379,10 @@ void PairEntropy::calculate()
        neighbors=nl->getNeighbors(index);
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j++) {  
-         double dfunc, d2;
-         Vector distance;
-         Vector distance_versor;
-         unsigned i0=index;
-         unsigned i1=neighbors[j];
-         if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-         if(pbc){
-          distance=pbcDistance(getPosition(i0),getPosition(i1));
-         } else {
-          distance=delta(getPosition(i0),getPosition(i1));
-         }
+         unsigned neighbor=neighbors[j];
+         if(getAbsoluteIndex(index)==getAbsoluteIndex(neighbor)) continue;
+         Vector distance=pbcDistance(getPosition(index),getPosition(neighbor));
+         double d2;
          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
            double distanceModulo=std::sqrt(d2);
            Vector distance_versor = distance / distanceModulo;
@@ -410,10 +396,11 @@ void PairEntropy::calculate()
            if (maxBin > (nhist-1)) maxBin=nhist-1;
            for(int k=minBin;k<maxBin+1;k+=1) {
              invNormKernel=invNormConstantBase/vectorX2[k];
+             double dfunc;
              gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc)/2.0;
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
-                gofrPrime[k][i0] += value;
+                gofrPrime[k][index] += value;
                 Tensor vv(value/2.0, distance);
                 gofrVirial[k] += vv;
              }
@@ -424,17 +411,8 @@ void PairEntropy::calculate()
   } else {
     for(unsigned int i=rank;i<(getNumberOfAtoms()-1);i+=stride) {
       for(unsigned int j=i+1;j<getNumberOfAtoms();j+=1) {
-         double dfunc, d2;
-         Vector distance;
-         Vector distance_versor;
-         unsigned i0=i; 
-         unsigned i1=j; 
-         if(getAbsoluteIndex(i0)==getAbsoluteIndex(i1)) continue;
-         if(pbc){
-          distance=pbcDistance(getPosition(i0),getPosition(i1));
-         } else {
-          distance=delta(getPosition(i0),getPosition(i1));
-         }
+         double d2;
+         Vector distance=pbcDistance(getPosition(i),getPosition(j));
          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
            double distanceModulo=std::sqrt(d2);
            Vector distance_versor = distance / distanceModulo;
@@ -448,11 +426,12 @@ void PairEntropy::calculate()
            if (maxBin > (nhist-1)) maxBin=nhist-1;
            for(int k=minBin;k<maxBin+1;k+=1) {
              invNormKernel=invNormConstantBase/vectorX2[k];
+             double dfunc;
              gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
-                gofrPrime[k][i0] += value;
-                gofrPrime[k][i1] -= value;
+                gofrPrime[k][i] += value;
+                gofrPrime[k][j] -= value;
                 Tensor vv(value, distance);
                 gofrVirial[k] += vv;
              }
