@@ -64,22 +64,18 @@ PAIRENTROPY ...
 //+ENDPLUMEDOC
 
 class PairEntropy : public Colvar {
-  bool pbc;
-  bool serial;
+  bool pbc, serial;
   // Neighbor list stuff
   bool doneigh;
   NeighborListParallel *nl;
   vector<AtomNumber> atoms_lista;
   bool invalidateList;
   bool firsttime;
-  // Output
-  bool doOutputGofr;
-  bool doOutputIntegrand;
-  unsigned outputStride;
+  // Others
   double maxr, sigma;
   unsigned nhist;
   double rcut2;
-  double sqrt2piSigma, sigmaSqr2, sigmaSqr, invNormKernel;
+  double sqrt2piSigma, sigmaSqr2, sigmaSqr;
   double deltar;
   unsigned deltaBin;
   double density_given;
@@ -89,8 +85,11 @@ class PairEntropy : public Colvar {
   Vector integrate(vector<Vector> integrand, double delta)const;
   Tensor integrate(vector<Tensor> integrand, double delta)const;
   // Kernel to calculate g(r)
-  double kernel(double distance, double&der)const;
+  double kernel(double distance, double invNormKernel, double&der)const;
   // Output gofr and integrand
+  bool doOutputGofr;
+  bool doOutputIntegrand;
+  unsigned outputStride;
   void outputGofr(vector<double> gofr);
   void outputIntegrand(vector<double> integrand);
   mutable PLMD::OFile gofrOfile, integrandOfile;
@@ -101,12 +100,11 @@ class PairEntropy : public Colvar {
   bool doAverageGofr;
   vector<double> avgGofr;
   unsigned iteration;
-  // Low communication variantA
+  // Low communication variant
   bool doLowComm;
 public:
   explicit PairEntropy(const ActionOptions&);
   ~PairEntropy();
-// active methods:
   virtual void calculate();
   virtual void prepare();
   static void registerKeywords( Keywords& keys );
@@ -211,7 +209,7 @@ firsttime(true)
     ifile.link(*this);
     ifile.open(referenceGofrFileName);
     referenceGofr.resize(nhist);
-    for(unsigned int i=0;i<nhist;i+=1) {
+    for(unsigned int i=0;i<nhist;i++) {
        double tmp_r;
        ifile.scanField("r",tmp_r).scanField("gofr",referenceGofr[i]).scanField();
     }
@@ -235,7 +233,7 @@ firsttime(true)
 
   checkRead();
 
-  // Neighbor lists
+  // Setup neighbor list
   if (doneigh) {
     nl= new NeighborListParallel(atoms_lista,pbc,getPbc(),comm,log,nl_cut,nl_full_list,nl_st,nl_skin);
     requestAtoms(nl->getFullAtomList());
@@ -255,7 +253,6 @@ firsttime(true)
     requestAtoms(atoms_lista);
   }
 
-
   // Define heavily used expressions
   sqrt2piSigma = std::sqrt(2*pi)*sigma;
   sigmaSqr2 = 2.*sigma*sigma;
@@ -265,7 +262,7 @@ firsttime(true)
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
   vectorX.resize(nhist);
   vectorX2.resize(nhist);
-  for(unsigned i=0;i<nhist;++i){
+  for(unsigned i=0;i<nhist;i++){
     vectorX[i]=deltar*i;
     vectorX2[i]=vectorX[i]*vectorX[i];
   }
@@ -298,14 +295,9 @@ void PairEntropy::prepare(){
 // calculator
 void PairEntropy::calculate()
 {
-  // Define output quantities
-  double pairEntropy;
-  vector<Vector> deriv(getNumberOfAtoms());
-  Tensor virial;
   // Define intermediate quantities
   vector<double> gofr(nhist);
-  vector<double> logGofr(nhist);
-  Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
+  Matrix<Vector> gofrPrime(getNumberOfAtoms(),nhist);
   vector<Tensor> gofrVirial(nhist);
   // Setup parallelization
   unsigned stride=comm.Get_size();
@@ -323,8 +315,7 @@ void PairEntropy::calculate()
   if (density_given>0) density=density_given;
   else density=getNumberOfAtoms()/volume;
   double TwoPiDensity = 2*pi*density;
-  double normConstantBase;
-  normConstantBase = TwoPiDensity*getNumberOfAtoms(); // Normalization of g(r)
+  double normConstantBase = TwoPiDensity*getNumberOfAtoms(); // Normalization of g(r)
   normConstantBase *= sqrt2piSigma; // Normalization of gaussian
   double invNormConstantBase = 1./normConstantBase; 
   // Calculation of g(r)
@@ -337,10 +328,11 @@ void PairEntropy::calculate()
        std::vector<unsigned> neighbors;
        unsigned index=nl->getIndexOfLocalAtom(i);
        neighbors=nl->getNeighbors(index);
+       Vector position_index=getPosition(index);
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j++) {  
          unsigned neighbor=neighbors[j];
-         Vector distance=pbcDistance(getPosition(index),getPosition(neighbor));
+         Vector distance=pbcDistance(position_index,getPosition(neighbor));
          double d2;
          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
            double distanceModulo=std::sqrt(d2);
@@ -353,14 +345,14 @@ void PairEntropy::calculate()
            if (minBin > (nhist-1)) minBin=nhist-1;
            maxBin=bin +  deltaBin;
            if (maxBin > (nhist-1)) maxBin=nhist-1;
-           for(int k=minBin;k<maxBin+1;k+=1) {
-             invNormKernel=invNormConstantBase/vectorX2[k];
+           for(int k=minBin;k<maxBin+1;k++) {
+             double invNormKernel=invNormConstantBase/vectorX2[k];
              double dfunc;
-             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+             gofr[k] += kernel(vectorX[k]-distanceModulo,invNormKernel,dfunc);
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
-                gofrPrime[k][index] += value;
-                gofrPrime[k][neighbor] -= value;
+                gofrPrime[index][k] += value;
+                gofrPrime[neighbor][k] -= value;
                 Tensor vv(value, distance);
                 gofrVirial[k] += vv;
              }
@@ -377,11 +369,12 @@ void PairEntropy::calculate()
        std::vector<unsigned> neighbors;
        unsigned index=nl->getIndexOfLocalAtom(i);
        neighbors=nl->getNeighbors(index);
+       Vector position_index=getPosition(index);
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j++) {  
          unsigned neighbor=neighbors[j];
          if(getAbsoluteIndex(index)==getAbsoluteIndex(neighbor)) continue;
-         Vector distance=pbcDistance(getPosition(index),getPosition(neighbor));
+         Vector distance=pbcDistance(position_index,getPosition(neighbor));
          double d2;
          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
            double distanceModulo=std::sqrt(d2);
@@ -394,13 +387,13 @@ void PairEntropy::calculate()
            if (minBin > (nhist-1)) minBin=nhist-1;
            maxBin=bin +  deltaBin;
            if (maxBin > (nhist-1)) maxBin=nhist-1;
-           for(int k=minBin;k<maxBin+1;k+=1) {
-             invNormKernel=invNormConstantBase/vectorX2[k];
+           for(int k=minBin;k<maxBin+1;k++) {
+             double invNormKernel=invNormConstantBase/vectorX2[k];
              double dfunc;
-             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc)/2.0;
+             gofr[k] += kernel(vectorX[k]-distanceModulo,invNormKernel,dfunc)/2.0;
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
-                gofrPrime[k][index] += value;
+                gofrPrime[index][k] += value;
                 Tensor vv(value/2.0, distance);
                 gofrVirial[k] += vv;
              }
@@ -410,7 +403,7 @@ void PairEntropy::calculate()
     }
   } else {
     for(unsigned int i=rank;i<(getNumberOfAtoms()-1);i+=stride) {
-      for(unsigned int j=i+1;j<getNumberOfAtoms();j+=1) {
+      for(unsigned int j=i+1;j<getNumberOfAtoms();j++) {
          double d2;
          Vector distance=pbcDistance(getPosition(i),getPosition(j));
          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
@@ -424,14 +417,14 @@ void PairEntropy::calculate()
            if (minBin > (nhist-1)) minBin=nhist-1;
            maxBin=bin +  deltaBin;
            if (maxBin > (nhist-1)) maxBin=nhist-1;
-           for(int k=minBin;k<maxBin+1;k+=1) {
-             invNormKernel=invNormConstantBase/vectorX2[k];
+           for(int k=minBin;k<maxBin+1;k++) {
+             double invNormKernel=invNormConstantBase/vectorX2[k];
              double dfunc;
-             gofr[k] += kernel(vectorX[k]-distanceModulo, dfunc);
+             gofr[k] += kernel(vectorX[k]-distanceModulo,invNormKernel,dfunc);
              if (!doNotCalculateDerivatives()) {
                 Vector value = dfunc * distance_versor;
-                gofrPrime[k][i] += value;
-                gofrPrime[k][j] -= value;
+                gofrPrime[i][k] += value;
+                gofrPrime[j][k] -= value;
                 Tensor vv(value, distance);
                 gofrVirial[k] += vv;
              }
@@ -441,23 +434,22 @@ void PairEntropy::calculate()
     }
   }
   if(!serial){
-    comm.Sum(&gofr[0],nhist);
+    comm.Sum(gofr);
     if (!doNotCalculateDerivatives()) {
        if (!doLowComm) {
-          comm.Sum(&gofrPrime[0][0],nhist*getNumberOfAtoms());
+          comm.Sum(gofrPrime);
        }
-       comm.Sum(&gofrVirial[0],nhist);
+       comm.Sum(gofrVirial);
     }
   }
   // Average g(r)
   if (doAverageGofr) {
-     // Cannot calculate derivatives when using the average g(r)
      if (!doNotCalculateDerivatives()) error("Cannot use the AVERAGE_GOFR keyword when biasing");
-     for(unsigned i=0;i<nhist;++i){
+     for(unsigned i=0;i<nhist;i++){
         avgGofr[i] += (gofr[i]-avgGofr[i])/( (double) iteration);
         gofr[i] = avgGofr[i];
      }
-     iteration += 1;
+     iteration++;
   }
   // Output of gofr
   if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofr);
@@ -469,42 +461,45 @@ void PairEntropy::calculate()
      ++j;
   }
   // Construct integrand
+  vector<double> logGofrX2(nhist);
   vector<double> integrand(nhist);
-  for(unsigned j=0;j<nhist;++j){
+  for(unsigned j=0;j<nhist;j++){
     if (doReferenceGofr) {
        if (referenceGofr[j]<1.e-10) {
           // Not sure about this choice
-          logGofr[j] = 0.;
+          logGofrX2[j] = 0.;
        } else {
-          logGofr[j] = std::log(gofr[j]/referenceGofr[j]);
+          logGofrX2[j] = std::log(gofr[j]/referenceGofr[j])*vectorX2[j];
        }
        if (gofr[j]<1.e-10) {
           integrand[j] = referenceGofr[j]*vectorX2[j];
        } else {
-          integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+referenceGofr[j])*vectorX2[j];
+          integrand[j] = (gofr[j]*logGofrX2[j])+(-gofr[j]+referenceGofr[j])*vectorX2[j];
        }
     } else {
-       logGofr[j] = std::log(gofr[j]);
+       logGofrX2[j] = std::log(gofr[j])*vectorX2[j];
        if (gofr[j]<1.e-10) {
           integrand[j] = vectorX2[j];
        } else {
-          integrand[j] = (gofr[j]*logGofr[j]-gofr[j]+1)*vectorX2[j];
+          integrand[j] = (gofr[j]*logGofrX2[j])+(-gofr[j]+1)*vectorX2[j];
        }
     }
   }
   // Output of integrands
   if (doOutputIntegrand && (getStep()%outputStride==0)) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
-  pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
+  double pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
+  vector<Vector> deriv(getNumberOfAtoms());
+  Tensor virial;
   if (!doNotCalculateDerivatives() ) {
     if (!doLowComm) {
        // Processors have already shared the gofrPrime
        for(unsigned int j=rank;j<getNumberOfAtoms();j+=stride) {
           vector<Vector> integrandDerivatives(nhist);
-          for(unsigned k=nhist_min;k<nhist;++k){
+          for(unsigned k=nhist_min;k<nhist;k++){
             if (gofr[k]>1.e-10) {
-              integrandDerivatives[k] = gofrPrime[k][j]*logGofr[k]*vectorX2[k];
+              integrandDerivatives[k] = gofrPrime[j][k]*logGofrX2[k];
             }
           }
           // Integrate
@@ -515,9 +510,9 @@ void PairEntropy::calculate()
        for(unsigned int j=0;j<nl->getNumberOfLocalAtoms();j++) {
           unsigned index=nl->getIndexOfLocalAtom(j);
           vector<Vector> integrandDerivatives(nhist);
-          for(unsigned k=nhist_min;k<nhist;++k){
+          for(unsigned k=nhist_min;k<nhist;k++){
             if (gofr[k]>1.e-10) {
-              integrandDerivatives[k] = gofrPrime[k][index]*logGofr[k]*vectorX2[k];
+              integrandDerivatives[k] = gofrPrime[index][k]*logGofrX2[k];
             }
           }
           // Integrate
@@ -525,14 +520,14 @@ void PairEntropy::calculate()
        }
     }
     if(!serial){
-      comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+      comm.Sum(deriv);
     }
     // Virial of positions
     // Construct virial integrand
     vector<Tensor> integrandVirial(nhist);
-    for(unsigned j=nhist_min;j<nhist;++j){
+    for(unsigned j=nhist_min;j<nhist;j++){
       if (gofr[j]>1.e-10) {
-        integrandVirial[j] = gofrVirial[j]*logGofr[j]*vectorX2[j];
+        integrandVirial[j] = gofrVirial[j]*logGofrX2[j];
       }
     }
     // Integrate virial
@@ -541,7 +536,7 @@ void PairEntropy::calculate()
     if (density_given<0) {
       // Construct virial integrand
       vector<double> integrandVirialVolume(nhist);
-      for(unsigned j=0;j<nhist;j+=1) {
+      for(unsigned j=0;j<nhist;j++) {
         if (doReferenceGofr) {
            integrandVirialVolume[j] = (-gofr[j]+referenceGofr[j])*vectorX2[j];
         } else {
@@ -553,14 +548,13 @@ void PairEntropy::calculate()
       }
   }
   // Assign output quantities
-  for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
+  for(unsigned i=0;i<deriv.size();i++) setAtomsDerivatives(i,deriv[i]);
   setValue           (pairEntropy);
   setBoxDerivatives  (virial);
 }
 
-double PairEntropy::kernel(double distance,double&der)const{
+double PairEntropy::kernel(double distance,double invNormKernel, double&der)const{
   // Gaussian function and derivative
-
   double result = invNormKernel*std::exp(-distance*distance/sigmaSqr2) ;
   der = -distance*result/sigmaSqr;
   return result;
@@ -569,7 +563,7 @@ double PairEntropy::kernel(double distance,double&der)const{
 double PairEntropy::integrate(vector<double> integrand, double delta)const{
   // Trapezoid rule
   double result = 0.;
-  for(unsigned i=1;i<(integrand.size()-1);++i){
+  for(unsigned i=1;i<(integrand.size()-1);i++){
     result += integrand[i];
   }
   result += 0.5*integrand[0];
@@ -581,7 +575,7 @@ double PairEntropy::integrate(vector<double> integrand, double delta)const{
 Vector PairEntropy::integrate(vector<Vector> integrand, double delta)const{
   // Trapezoid rule
   Vector result;
-  for(unsigned i=1;i<(integrand.size()-1);++i){
+  for(unsigned i=1;i<(integrand.size()-1);i++){
       result += integrand[i];
   }
   result += 0.5*integrand[0];
@@ -593,7 +587,7 @@ Vector PairEntropy::integrate(vector<Vector> integrand, double delta)const{
 Tensor PairEntropy::integrate(vector<Tensor> integrand, double delta)const{
   // Trapezoid rule
   Tensor result;
-  for(unsigned i=1;i<(integrand.size()-1);++i){
+  for(unsigned i=1;i<(integrand.size()-1);i++){
       result += integrand[i];
   }
   result += 0.5*integrand[0];
@@ -603,7 +597,7 @@ Tensor PairEntropy::integrate(vector<Tensor> integrand, double delta)const{
 }
 
 void PairEntropy::outputGofr(vector<double> gofr) {
-  for(unsigned i=0;i<gofr.size();++i){
+  for(unsigned i=0;i<gofr.size();i++){
      gofrOfile.printField("r",vectorX[i]).printField("gofr",gofr[i]).printField();
   }
   gofrOfile.printf("\n");
@@ -611,7 +605,7 @@ void PairEntropy::outputGofr(vector<double> gofr) {
 }
 
 void PairEntropy::outputIntegrand(vector<double> integrand) {
-  for(unsigned i=0;i<integrand.size();++i){
+  for(unsigned i=0;i<integrand.size();i++){
      integrandOfile.printField("r",vectorX[i]).printField("integrand",integrand[i]).printField();
   }
   integrandOfile.printf("\n");
