@@ -88,10 +88,12 @@ class PairOrientationalEntropy : public Colvar {
   void outputIntegrand(vector<double> integrand);
   int outputStride;
   bool doOutputGofr, doOutputIntegrand;
+  mutable PLMD::OFile gofrOfile;
   // Average gofr
   Matrix<double> avgGofr;
   unsigned iteration;
   bool doAverageGofr;
+  unsigned averageGofrTau;
   // Up-down symmetry
   bool doUpDownSymmetry;
   double startCosAngle;
@@ -113,6 +115,7 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
   keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
+  keys.add("optional","AVERAGE_GOFR_TAU","Characteristic length of a window in which to average the g(r). It is in units of iterations and should be an integer. Zero corresponds to an normal average (infinite window).");
   keys.addFlag("UP_DOWN_SYMMETRY",false,"The symmetry is such that parallel and antiparallel vectors are not distinguished. The angle goes from 0 to pi/2 instead of from 0 to pi.");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
@@ -200,6 +203,8 @@ firsttime(true)
   parseFlag("OUTPUT_GOFR",doOutputGofr);
   if (doOutputGofr) { 
      log.printf("  The g(r) will be written to a file \n");
+     gofrOfile.link(*this);
+     gofrOfile.open("gofr.txt");
   }
   doOutputIntegrand=false;
   parseFlag("OUTPUT_INTEGRAND",doOutputIntegrand);
@@ -216,9 +221,15 @@ firsttime(true)
   parseFlag("AVERAGE_GOFR",doAverageGofr);
   if (doAverageGofr) {
      iteration = 1;
-     log.printf("  The g(r) will be averaged over all frames \n");
      avgGofr.resize(nhist_[0],nhist_[1]);
   }
+  averageGofrTau=0;
+  parse("AVERAGE_GOFR_TAU",averageGofrTau);
+  if (averageGofrTau!=0 && !doAverageGofr) error("AVERAGE_GOFR_TAU specified but AVERAGE_GOFR not given. Specify AVERAGE_GOFR or remove AVERAGE_GOFR_TAU");
+  if (doAverageGofr && averageGofrTau==0) log.printf("The g(r) will be averaged over all frames \n");
+  if (doAverageGofr && averageGofrTau!=0) log.printf("The g(r) will be averaged with a window of %d steps \n", averageGofrTau);
+
+
 
   doLowComm=false;
   parseFlag("LOW_COMM",doLowComm);
@@ -284,6 +295,7 @@ PairOrientationalEntropy::~PairOrientationalEntropy(){
      nl->printStats();
      delete nl;
   }
+  if (doOutputGofr) gofrOfile.close();
 }
 
 void PairOrientationalEntropy::prepare(){
@@ -666,16 +678,21 @@ void PairOrientationalEntropy::calculate()
   //std::cout << "Communication: " <<  float( clock () - begin_time ) << "\n";
   //begin_time = clock();
   if (doAverageGofr) {
+     if (!doNotCalculateDerivatives()) error("Cannot calculate derivatives or bias using the AVERAGE_GOFR option");
+     double factor;
+     if (averageGofrTau==0 || iteration < averageGofrTau) {
+        iteration += 1;
+        factor = 1./( (double) iteration );
+     } else factor = 2./((double) averageGofrTau + 1.);
      for(unsigned i=0;i<nhist_[0];++i){
         for(unsigned j=0;j<nhist_[1];++j){
-           avgGofr[i][j] += (gofr[i][j]-avgGofr[i][j])/( (double) iteration);
+           avgGofr[i][j] += (gofr[i][j]-avgGofr[i][j])*factor;
            gofr[i][j] = avgGofr[i][j];
         }
      }
-     iteration += 1;
   }
   // Output of gofr
-  if (doOutputGofr && (getStep()%outputStride==0) && rank==0) outputGofr(gofr,"gofr.txt");
+  if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofr,"gofr.txt");
   // Construct integrand
   Matrix<double> integrand(nhist_[0],nhist_[1]);
   Matrix<double> logGofrx1sqr(nhist_[0],nhist_[1]);
@@ -868,15 +885,14 @@ Tensor PairOrientationalEntropy::integrate(Matrix<Tensor> integrand, vector<doub
 }
 
 void PairOrientationalEntropy::outputGofr(Matrix<double> gofr, const char* fileName) {
-  PLMD::OFile gofrOfile;
-  gofrOfile.open(fileName);
   for(unsigned i=0;i<nhist_[0];++i){
      for(unsigned j=0;j<nhist_[1];++j){
         gofrOfile.printField("r",x1[i]).printField("theta",x2[j]).printField("gofr",gofr[i][j]).printField();
      }
      gofrOfile.printf("\n");
   }
-  gofrOfile.close();
+  gofrOfile.printf("\n");
+  gofrOfile.printf("\n");
 }
 
 }
