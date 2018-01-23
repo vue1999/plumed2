@@ -63,10 +63,10 @@ PAIRENTROPY ...
 */
 //+ENDPLUMEDOC
 
-class PairOrientationalEntropy : public Colvar {
+class PairOrientationalEntropyPerpendicular : public Colvar {
   bool pbc, serial, invalidateList, firsttime, doneigh;
   NeighborListParallel *nl;
-  vector<AtomNumber> center_lista,start_lista,end_lista;
+  vector<AtomNumber> center_lista,start1_lista,end1_lista,start2_lista,end2_lista;
   std::vector<PLMD::AtomNumber> atomsToRequest;
   double maxr;
   vector<int> nhist_;
@@ -100,16 +100,16 @@ class PairOrientationalEntropy : public Colvar {
   // Low communication variant
   bool doLowComm;
 public:
-  explicit PairOrientationalEntropy(const ActionOptions&);
-  ~PairOrientationalEntropy();
+  explicit PairOrientationalEntropyPerpendicular(const ActionOptions&);
+  ~PairOrientationalEntropyPerpendicular();
   virtual void calculate();
   virtual void prepare();
   static void registerKeywords( Keywords& keys );
 };
 
-PLUMED_REGISTER_ACTION(PairOrientationalEntropy,"PAIR_ORIENTATIONAL_ENTROPY")
+PLUMED_REGISTER_ACTION(PairOrientationalEntropyPerpendicular,"PAIR_ORIENTATIONAL_ENTROPY_PERPENDICULAR")
 
-void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
+void PairOrientationalEntropyPerpendicular::registerKeywords( Keywords& keys ){
   Colvar::registerKeywords(keys);
   keys.addFlag("SERIAL",false,"Perform the calculation in serial - for debug purpose");
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
@@ -123,15 +123,17 @@ void PairOrientationalEntropy::registerKeywords( Keywords& keys ){
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list");
   keys.add("atoms","ORIGIN","Define an atom that represents the origin from which to calculate the g(r,theta)");
   keys.add("atoms","CENTER","Center atoms");
-  keys.add("atoms","START","Start point of vector defining orientation");
-  keys.add("atoms","END","End point of vector defining orientation");
+  keys.add("atoms","START1","Start point of first vector defining orientation");
+  keys.add("atoms","START2","Start point of second vector defining orientation");
+  keys.add("atoms","END1","End point of first vector defining orientation");
+  keys.add("atoms","END2","End point of second vector defining orientation");
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
   keys.addFlag("LOW_COMM",false,"Use an algorithm with less communication between processors");
 }
 
-PairOrientationalEntropy::PairOrientationalEntropy(const ActionOptions&ao):
+PairOrientationalEntropyPerpendicular::PairOrientationalEntropyPerpendicular(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 pbc(true),
 serial(false),
@@ -142,10 +144,14 @@ firsttime(true)
   parseFlag("SERIAL",serial);
 
   parseAtomList("CENTER",center_lista);
-  parseAtomList("START",start_lista);
-  parseAtomList("END",end_lista);
-  if(center_lista.size()!=start_lista.size()) error("Number of atoms in START must be equal to the number of atoms in CENTER");
-  if(center_lista.size()!=end_lista.size()) error("Number of atoms in START must be equal to the number of atoms in CENTER");
+  parseAtomList("START1",start1_lista);
+  parseAtomList("END1",end1_lista);
+  parseAtomList("START2",start2_lista);
+  parseAtomList("END2",end2_lista);
+  if(center_lista.size()!=start1_lista.size()) error("Number of atoms in START1 must be equal to the number of atoms in CENTER");
+  if(center_lista.size()!=end1_lista.size()) error("Number of atoms in END1 must be equal to the number of atoms in CENTER");
+  if(center_lista.size()!=start2_lista.size()) error("Number of atoms in START2 must be equal to the number of atoms in CENTER");
+  if(center_lista.size()!=end2_lista.size()) error("Number of atoms in END2 must be equal to the number of atoms in CENTER");
 
   bool nopbc=!pbc;
   pbc=!nopbc;
@@ -251,10 +257,12 @@ firsttime(true)
       log.printf("  checking every step for dangerous builds and rebuilding as needed\n");
     }
   }
-  atomsToRequest.reserve ( center_lista.size() + start_lista.size() + end_lista.size() );
+  atomsToRequest.reserve ( center_lista.size() + start1_lista.size() + end1_lista.size() + start2_lista.size() + end2_lista.size() );
   atomsToRequest.insert (atomsToRequest.end(), center_lista.begin(), center_lista.end() );
-  atomsToRequest.insert (atomsToRequest.end(), start_lista.begin(), start_lista.end() );
-  atomsToRequest.insert (atomsToRequest.end(), end_lista.begin(), end_lista.end() );
+  atomsToRequest.insert (atomsToRequest.end(), start1_lista.begin(), start1_lista.end() );
+  atomsToRequest.insert (atomsToRequest.end(), end1_lista.begin(), end1_lista.end() );
+  atomsToRequest.insert (atomsToRequest.end(), start2_lista.begin(), start2_lista.end() );
+  atomsToRequest.insert (atomsToRequest.end(), end2_lista.begin(), end2_lista.end() );
   requestAtoms(atomsToRequest);
 
   // Define heavily used expressions
@@ -289,7 +297,7 @@ firsttime(true)
   }
 }
 
-PairOrientationalEntropy::~PairOrientationalEntropy(){
+PairOrientationalEntropyPerpendicular::~PairOrientationalEntropyPerpendicular(){
   if (doneigh) {
      nl->printStats();
      delete nl;
@@ -297,7 +305,7 @@ PairOrientationalEntropy::~PairOrientationalEntropy(){
   if (doOutputGofr) gofrOfile.close();
 }
 
-void PairOrientationalEntropy::prepare(){
+void PairOrientationalEntropyPerpendicular::prepare(){
   if(doneigh && nl->getStride()>0){
     if(firsttime) {
       invalidateList=true;
@@ -313,14 +321,16 @@ void PairOrientationalEntropy::prepare(){
 }
 
 // calculator
-void PairOrientationalEntropy::calculate()
+void PairOrientationalEntropyPerpendicular::calculate()
 {
   //clock_t begin_time = clock();
   // Define intermediate quantities
   Matrix<double> gofr(nhist_[0],nhist_[1]);
   vector<Vector> gofrPrimeCenter(nhist_[0]*nhist_[1]*center_lista.size());
-  vector<Vector> gofrPrimeStart(nhist_[0]*nhist_[1]*center_lista.size());
-  vector<Vector> gofrPrimeEnd(nhist_[0]*nhist_[1]*center_lista.size());
+  vector<Vector> gofrPrimeStart1(nhist_[0]*nhist_[1]*center_lista.size());
+  vector<Vector> gofrPrimeEnd1(nhist_[0]*nhist_[1]*center_lista.size());
+  vector<Vector> gofrPrimeStart2(nhist_[0]*nhist_[1]*center_lista.size());
+  vector<Vector> gofrPrimeEnd2(nhist_[0]*nhist_[1]*center_lista.size());
   Matrix<Tensor> gofrVirial(nhist_[0],nhist_[1]);
   // Calculate volume and density
   double volume=getBox().determinant();
@@ -350,15 +360,22 @@ void PairOrientationalEntropy::calculate()
       nl->update(centerPositions);
     }
     for(unsigned int i=0;i<nl->getNumberOfLocalAtoms();i+=1) {
+
        unsigned index=nl->getIndexOfLocalAtom(i);
        unsigned atom1_mol1=index+center_lista.size();
-       unsigned atom2_mol1=index+center_lista.size()+start_lista.size();
+       unsigned atom2_mol1=index+2*center_lista.size();
+       unsigned atom3_mol1=index+3*center_lista.size();
+       unsigned atom4_mol1=index+4*center_lista.size();
        std::vector<unsigned> neighbors=nl->getNeighbors(index);
+ 
        Vector position_index=getPosition(index);
-       Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+       Vector mol1_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+       Vector mol1_vector2=pbcDistance(getPosition(atom3_mol1),getPosition(atom4_mol1)); 
+       Vector mol_vector1=crossProduct(mol1_vector1,mol1_vector2); 
        double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
        double inv_v1=1./norm_v1;
        double inv_v1_sqr=inv_v1*inv_v1;
+
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j+=1) {  
           unsigned neighbor=neighbors[j];
@@ -369,17 +386,35 @@ void PairOrientationalEntropy::calculate()
              double distanceModulo=std::sqrt(d2);
              Vector distance_versor = distance / distanceModulo;
              unsigned bin=std::floor(distanceModulo/deltar);
+
              unsigned atom1_mol2=neighbor+center_lista.size();
-             unsigned atom2_mol2=neighbor+center_lista.size()+start_lista.size();
-             Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+             unsigned atom2_mol2=neighbor+2*center_lista.size();
+             unsigned atom3_mol2=neighbor+3*center_lista.size();
+             unsigned atom4_mol2=neighbor+4*center_lista.size();
+          
+             Vector mol2_vector1=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2)); 
+             Vector mol2_vector2=pbcDistance(getPosition(atom3_mol2),getPosition(atom4_mol2)); 
+             Vector mol_vector2=crossProduct(mol2_vector1,mol2_vector2); 
              double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
              double inv_v2=1./norm_v2;
              double inv_v1_inv_v2=inv_v1*inv_v2;
              double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-             Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+             
+             Vector der_cosTheta_mol1_vector1;
+             der_cosTheta_mol1_vector1[0]=(-mol1_vector2[2]*mol_vector2[1]+mol1_vector2[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[2]*mol_vector1[1]+mol1_vector2[1]*mol_vector1[2]);
+             der_cosTheta_mol1_vector1[1]=( mol1_vector2[2]*mol_vector2[0]-mol1_vector2[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector2[2]*mol_vector1[0]-mol1_vector2[0]*mol_vector1[2]);
+             der_cosTheta_mol1_vector1[2]=(-mol1_vector2[1]*mol_vector2[0]+mol1_vector2[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[1]*mol_vector1[0]+mol1_vector2[0]*mol_vector1[1]);
+             
+             Vector der_cosTheta_mol1_vector2;
+             der_cosTheta_mol1_vector2[0]=( mol1_vector1[2]*mol_vector2[1]-mol1_vector1[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[2]*mol_vector1[1]-mol1_vector1[1]*mol_vector1[2]);
+             der_cosTheta_mol1_vector2[1]=(-mol1_vector1[2]*mol_vector2[0]+mol1_vector1[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector1[2]*mol_vector1[0]+mol1_vector1[0]*mol_vector1[2]);
+             der_cosTheta_mol1_vector2[2]=( mol1_vector1[1]*mol_vector2[0]-mol1_vector1[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[1]*mol_vector1[0]-mol1_vector1[0]*mol_vector1[1]);
+             
              if (doUpDownSymmetry && cosAngle<0) {
-                der_mol1 *= -1.;
+                der_cosTheta_mol1_vector1 *= -1.;
+                der_cosTheta_mol1_vector2 *= -1.;
              }
+             
              unsigned binAngle;
              if (doUpDownSymmetry && cosAngle<0) {
                 binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
@@ -417,23 +452,31 @@ void PairOrientationalEntropy::calculate()
                   } else {
                      h=l;
                   }
+                  Vector value1;
                   vector<double> dfunc(2);
                   if (l==(nhist_[1]-1) || l==0) {
-                     gofr[k][h] += kernel(pos,invNormKernel*2.,dfunc)/2.;
+                     gofr[k][h] += kernel(pos,2*invNormKernel,dfunc)/2.;
                   } else {
                      gofr[k][h] += kernel(pos,invNormKernel,dfunc)/2.;
                   }
-                  Vector value1 = dfunc[0]*distance_versor;
-                  Vector value2_mol1 = dfunc[1]*der_mol1;
+                  value1 = dfunc[0]*distance_versor;
+                  Vector value2_mol1_vector1 = dfunc[1]*der_cosTheta_mol1_vector1;
+                  Vector value2_mol1_vector2 = dfunc[1]*der_cosTheta_mol1_vector2;
+                    
                   gofrPrimeCenter[index*nhist1_nhist2_+k*nhist_[1]+h] += value1;
-                  gofrPrimeStart[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
-                  gofrPrimeEnd[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
+                  gofrPrimeStart1[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector1;
+                  gofrPrimeEnd1[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector1;
+                  gofrPrimeStart2[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector2;
+                  gofrPrimeEnd2[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector2;
+             
                   Tensor vv1(value1, distance);
-                  Tensor vv2_mol1(value2_mol1, mol_vector1);
-                  gofrVirial[k][h] += vv1/2.+vv2_mol1;
+                  Tensor vv2_mol1_vector1(value2_mol1_vector1, mol1_vector1);
+                  Tensor vv2_mol1_vector2(value2_mol1_vector2, mol1_vector2);
+             
+                  gofrVirial[k][h] += vv1/2. + vv2_mol1_vector1 + vv2_mol1_vector2;
                }
-             }
-           }
+            }
+          }
         }
      }
   } else if (doneigh && !doLowComm) {
@@ -442,15 +485,22 @@ void PairOrientationalEntropy::calculate()
       nl->update(centerPositions);
     }
     for(unsigned int i=0;i<nl->getNumberOfLocalAtoms();i+=1) {
+
        unsigned index=nl->getIndexOfLocalAtom(i);
        unsigned atom1_mol1=index+center_lista.size();
-       unsigned atom2_mol1=index+center_lista.size()+start_lista.size();
+       unsigned atom2_mol1=index+2*center_lista.size();
+       unsigned atom3_mol1=index+3*center_lista.size();
+       unsigned atom4_mol1=index+4*center_lista.size();
        std::vector<unsigned> neighbors=nl->getNeighbors(index);
+ 
        Vector position_index=getPosition(index);
-       Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+       Vector mol1_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+       Vector mol1_vector2=pbcDistance(getPosition(atom3_mol1),getPosition(atom4_mol1)); 
+       Vector mol_vector1=crossProduct(mol1_vector1,mol1_vector2); 
        double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
        double inv_v1=1./norm_v1;
        double inv_v1_sqr=inv_v1*inv_v1;
+
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j+=1) {  
           unsigned neighbor=neighbors[j];
@@ -460,20 +510,48 @@ void PairOrientationalEntropy::calculate()
              double distanceModulo=std::sqrt(d2);
              Vector distance_versor = distance / distanceModulo;
              unsigned bin=std::floor(distanceModulo/deltar);
+
              unsigned atom1_mol2=neighbor+center_lista.size();
-             unsigned atom2_mol2=neighbor+center_lista.size()+start_lista.size();
-             Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+             unsigned atom2_mol2=neighbor+2*center_lista.size();
+             unsigned atom3_mol2=neighbor+3*center_lista.size();
+             unsigned atom4_mol2=neighbor+4*center_lista.size();
+          
+             Vector mol2_vector1=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2)); 
+             Vector mol2_vector2=pbcDistance(getPosition(atom3_mol2),getPosition(atom4_mol2)); 
+             Vector mol_vector2=crossProduct(mol2_vector1,mol2_vector2); 
              double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
              double inv_v2=1./norm_v2;
              double inv_v2_sqr=inv_v2*inv_v2;
              double inv_v1_inv_v2=inv_v1*inv_v2;
              double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-             Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
-             Vector der_mol2=mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr;
+             
+             Vector der_cosTheta_mol1_vector1;
+             der_cosTheta_mol1_vector1[0]=(-mol1_vector2[2]*mol_vector2[1]+mol1_vector2[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[2]*mol_vector1[1]+mol1_vector2[1]*mol_vector1[2]);
+             der_cosTheta_mol1_vector1[1]=( mol1_vector2[2]*mol_vector2[0]-mol1_vector2[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector2[2]*mol_vector1[0]-mol1_vector2[0]*mol_vector1[2]);
+             der_cosTheta_mol1_vector1[2]=(-mol1_vector2[1]*mol_vector2[0]+mol1_vector2[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[1]*mol_vector1[0]+mol1_vector2[0]*mol_vector1[1]);
+             
+             Vector der_cosTheta_mol1_vector2;
+             der_cosTheta_mol1_vector2[0]=( mol1_vector1[2]*mol_vector2[1]-mol1_vector1[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[2]*mol_vector1[1]-mol1_vector1[1]*mol_vector1[2]);
+             der_cosTheta_mol1_vector2[1]=(-mol1_vector1[2]*mol_vector2[0]+mol1_vector1[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector1[2]*mol_vector1[0]+mol1_vector1[0]*mol_vector1[2]);
+             der_cosTheta_mol1_vector2[2]=( mol1_vector1[1]*mol_vector2[0]-mol1_vector1[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[1]*mol_vector1[0]-mol1_vector1[0]*mol_vector1[1]);
+             
+             Vector der_cosTheta_mol2_vector1;
+             der_cosTheta_mol2_vector1[0]=(-mol2_vector2[2]*mol_vector1[1]+mol2_vector2[1]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector2[2]*mol_vector2[1]+mol2_vector2[1]*mol_vector2[2]);
+             der_cosTheta_mol2_vector1[1]=( mol2_vector2[2]*mol_vector1[0]-mol2_vector2[0]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector2[2]*mol_vector2[0]-mol2_vector2[0]*mol_vector2[2]);
+             der_cosTheta_mol2_vector1[2]=(-mol2_vector2[1]*mol_vector1[0]+mol2_vector2[0]*mol_vector1[1])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector2[1]*mol_vector2[0]+mol2_vector2[0]*mol_vector2[1]);
+             
+             Vector der_cosTheta_mol2_vector2;
+             der_cosTheta_mol2_vector2[0]=( mol2_vector1[2]*mol_vector1[1]-mol2_vector1[1]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector1[2]*mol_vector2[1]-mol2_vector1[1]*mol_vector2[2]);
+             der_cosTheta_mol2_vector2[1]=(-mol2_vector1[2]*mol_vector1[0]+mol2_vector1[0]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector1[2]*mol_vector2[0]+mol2_vector1[0]*mol_vector2[2]);
+             der_cosTheta_mol2_vector2[2]=( mol2_vector1[1]*mol_vector1[0]-mol2_vector1[0]*mol_vector1[1])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector1[1]*mol_vector2[0]-mol2_vector1[0]*mol_vector2[1]);
+             
              if (doUpDownSymmetry && cosAngle<0) {
-                der_mol1 *= -1.;
-                der_mol2 *= -1.;
+                der_cosTheta_mol1_vector1 *= -1.;
+                der_cosTheta_mol1_vector2 *= -1.;
+                der_cosTheta_mol2_vector1 *= -1.;
+                der_cosTheta_mol2_vector2 *= -1.;
              }
+             
              unsigned binAngle;
              if (doUpDownSymmetry && cosAngle<0) {
                 binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
@@ -511,44 +589,61 @@ void PairOrientationalEntropy::calculate()
                   } else {
                      h=l;
                   }
+                  Vector value1;
                   vector<double> dfunc(2);
                   if (l==(nhist_[1]-1) || l==0) {
                      gofr[k][h] += kernel(pos,2*invNormKernel,dfunc);
                   } else {
                      gofr[k][h] += kernel(pos,invNormKernel,dfunc);
                   }
-                  Vector value1 = dfunc[0]*distance_versor;
-                  Vector value2_mol1 = dfunc[1]*der_mol1;
-                  Vector value2_mol2 = dfunc[1]*der_mol2;
-
+                  value1 = dfunc[0]*distance_versor;
+                  Vector value2_mol1_vector1 = dfunc[1]*der_cosTheta_mol1_vector1;
+                  Vector value2_mol1_vector2 = dfunc[1]*der_cosTheta_mol1_vector2;
+                  Vector value2_mol2_vector1 = dfunc[1]*der_cosTheta_mol2_vector1;
+                  Vector value2_mol2_vector2 = dfunc[1]*der_cosTheta_mol2_vector2;
+                    
                   gofrPrimeCenter[index*nhist1_nhist2_+k*nhist_[1]+h] += value1;
-                  gofrPrimeStart[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
-                  gofrPrimeEnd[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
-
+                  gofrPrimeStart1[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector1;
+                  gofrPrimeEnd1[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector1;
+                  gofrPrimeStart2[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector2;
+                  gofrPrimeEnd2[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector2;
+             
                   gofrPrimeCenter[neighbor*nhist1_nhist2_+k*nhist_[1]+h] -= value1;
-                  gofrPrimeStart[neighbor*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2;
-                  gofrPrimeEnd[neighbor*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2;
-
+                  gofrPrimeStart1[neighbor*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2_vector1;
+                  gofrPrimeEnd1[neighbor*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2_vector1;
+                  gofrPrimeStart2[neighbor*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2_vector2;
+                  gofrPrimeEnd2[neighbor*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2_vector2;
+             
                   Tensor vv1(value1, distance);
-                  Tensor vv2_mol1(value2_mol1, mol_vector1);
-                  Tensor vv2_mol2(value2_mol2, mol_vector2);
-                  gofrVirial[k][h] += vv1+vv2_mol1+vv2_mol2;
+                  Tensor vv2_mol1_vector1(value2_mol1_vector1, mol1_vector1);
+                  Tensor vv2_mol1_vector2(value2_mol1_vector2, mol1_vector2);
+                  Tensor vv2_mol2_vector1(value2_mol2_vector1, mol2_vector1);
+                  Tensor vv2_mol2_vector2(value2_mol2_vector2, mol2_vector2);
+             
+                  gofrVirial[k][h] += vv1 + vv2_mol1_vector1 + vv2_mol1_vector2+ vv2_mol2_vector1 + vv2_mol2_vector2;
                }
-             }
-           }
+            }
+          }
         }
      }
   } else if (!doneigh && doLowComm) {
     for(unsigned int i=rank;i<center_lista.size();i+=stride) {
       unsigned atom1_mol1=i+center_lista.size();
-      unsigned atom2_mol1=i+center_lista.size()+start_lista.size();
-      Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      unsigned atom2_mol1=i+2*center_lista.size();
+      unsigned atom3_mol1=i+3*center_lista.size();
+      unsigned atom4_mol1=i+4*center_lista.size();
+
+      Vector mol1_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      Vector mol1_vector2=pbcDistance(getPosition(atom3_mol1),getPosition(atom4_mol1)); 
+      Vector mol_vector1=crossProduct(mol1_vector1,mol1_vector2); 
       double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
       double inv_v1=1./norm_v1;
       double inv_v1_sqr=inv_v1*inv_v1;
+
       for(unsigned int j=0;j<center_lista.size();j+=1) {
         double d2;
         Vector distance;
+        Vector distance_versor;
         if(getAbsoluteIndex(i)==getAbsoluteIndex(j)) continue;
         if(pbc){
          distance=pbcDistance(getPosition(i),getPosition(j));
@@ -559,17 +654,36 @@ void PairOrientationalEntropy::calculate()
           double distanceModulo=std::sqrt(d2);
           Vector distance_versor = distance / distanceModulo;
           unsigned bin=std::floor(distanceModulo/deltar);
+
           unsigned atom1_mol2=j+center_lista.size();
-          unsigned atom2_mol2=j+center_lista.size()+start_lista.size();
-          Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+          unsigned atom2_mol2=j+2*center_lista.size();
+          unsigned atom3_mol2=j+3*center_lista.size();
+          unsigned atom4_mol2=j+4*center_lista.size();
+
+          Vector mol2_vector1=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2)); 
+          Vector mol2_vector2=pbcDistance(getPosition(atom3_mol2),getPosition(atom4_mol2)); 
+          Vector mol_vector2=crossProduct(mol2_vector1,mol2_vector2); 
           double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
+
           double inv_v2=1./norm_v2;
           double inv_v1_inv_v2=inv_v1*inv_v2;
           double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-          Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+
+          Vector der_cosTheta_vector1;
+          der_cosTheta_vector1[0]=(-mol1_vector2[2]*mol_vector2[1]+mol1_vector2[1]*mol_vector2[2])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*(-mol1_vector2[2]*mol_vector1[1]+mol1_vector2[1]*mol_vector1[2]);
+          der_cosTheta_vector1[1]=( mol1_vector2[2]*mol_vector2[0]-mol1_vector2[0]*mol_vector2[2])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*( mol1_vector2[2]*mol_vector1[0]-mol1_vector2[0]*mol_vector1[2]);
+          der_cosTheta_vector1[2]=(-mol1_vector2[1]*mol_vector2[0]+mol1_vector2[0]*mol_vector2[1])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*(-mol1_vector2[1]*mol_vector1[0]+mol1_vector2[0]*mol_vector1[1]);
+
+          Vector der_cosTheta_vector2;
+          der_cosTheta_vector2[0]=( mol1_vector1[2]*mol_vector2[1]-mol1_vector1[1]*mol_vector2[2])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*( mol1_vector1[2]*mol_vector1[1]-mol1_vector1[1]*mol_vector1[2]);
+          der_cosTheta_vector2[1]=(-mol1_vector1[2]*mol_vector2[0]+mol1_vector1[0]*mol_vector2[2])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*(-mol1_vector1[2]*mol_vector1[0]+mol1_vector1[0]*mol_vector1[2]);
+          der_cosTheta_vector2[2]=( mol1_vector1[1]*mol_vector2[0]-mol1_vector1[0]*mol_vector2[1])*inv_v1_inv_v2 - cosAngle*inv_v1_sqr*( mol1_vector1[1]*mol_vector1[0]-mol1_vector1[0]*mol_vector1[1]);
+
           if (doUpDownSymmetry && cosAngle<0) {
-             der_mol1 *= -1.;
+             der_cosTheta_vector1 *= -1.;
+             der_cosTheta_vector2 *= -1.;
           }
+
           unsigned binAngle;
           if (doUpDownSymmetry && cosAngle<0) {
              binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
@@ -607,22 +721,29 @@ void PairOrientationalEntropy::calculate()
                } else {
                   h=l;
                }
+               Vector value1;
+               Vector value2_mol1_vector1;
+               Vector value2_mol1_vector2;
                vector<double> dfunc(2);
                if (l==(nhist_[1]-1) || l==0) {
                   gofr[k][h] += kernel(pos,2*invNormKernel,dfunc)/2.;
                } else {
                   gofr[k][h] += kernel(pos,invNormKernel,dfunc)/2.;
                }
-               Vector value1 = dfunc[0]*distance_versor;
-               Vector value2_mol1 = dfunc[1]*der_mol1;
+               value1 = dfunc[0]*distance_versor;
+               value2_mol1_vector1 = dfunc[1]*der_cosTheta_vector1;
+               value2_mol1_vector2 = dfunc[1]*der_cosTheta_vector2;
 
                gofrPrimeCenter[i*nhist1_nhist2_+k*nhist_[1]+h] += value1;
-               gofrPrimeStart[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
-               gofrPrimeEnd[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
+               gofrPrimeStart1[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector1;
+               gofrPrimeEnd1[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector1;
+               gofrPrimeStart2[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector2;
+               gofrPrimeEnd2[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector2;
 
                Tensor vv1(value1, distance);
-               Tensor vv2_mol1(value2_mol1, mol_vector1);
-               gofrVirial[k][h] += vv1/2.+vv2_mol1; //+vv2_mol2;
+               Tensor vv2_mol1_vector1(value2_mol1_vector1, mol1_vector1);
+               Tensor vv2_mol1_vector2(value2_mol1_vector2, mol1_vector2);
+               gofrVirial[k][h] += vv1/2. + vv2_mol1_vector1 + vv2_mol1_vector2;
             }
           }
         }
@@ -631,14 +752,21 @@ void PairOrientationalEntropy::calculate()
   } else if (!doneigh && !doLowComm) {
     for(unsigned int i=rank;i<(center_lista.size()-1);i+=stride) {
       unsigned atom1_mol1=i+center_lista.size();
-      unsigned atom2_mol1=i+center_lista.size()+start_lista.size();
-      Vector mol_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      unsigned atom2_mol1=i+2*center_lista.size();
+      unsigned atom3_mol1=i+3*center_lista.size();
+      unsigned atom4_mol1=i+4*center_lista.size();
+
+      Vector mol1_vector1=pbcDistance(getPosition(atom1_mol1),getPosition(atom2_mol1)); 
+      Vector mol1_vector2=pbcDistance(getPosition(atom3_mol1),getPosition(atom4_mol1)); 
+      Vector mol_vector1=crossProduct(mol1_vector1,mol1_vector2); 
       double norm_v1 = std::sqrt(mol_vector1[0]*mol_vector1[0]+mol_vector1[1]*mol_vector1[1]+mol_vector1[2]*mol_vector1[2]);
       double inv_v1=1./norm_v1;
       double inv_v1_sqr=inv_v1*inv_v1;
+
       for(unsigned int j=i+1;j<center_lista.size();j+=1) {
         double d2;
         Vector distance;
+        Vector distance_versor;
         if(getAbsoluteIndex(i)==getAbsoluteIndex(j)) continue;
         if(pbc){
          distance=pbcDistance(getPosition(i),getPosition(j));
@@ -649,20 +777,49 @@ void PairOrientationalEntropy::calculate()
           double distanceModulo=std::sqrt(d2);
           Vector distance_versor = distance / distanceModulo;
           unsigned bin=std::floor(distanceModulo/deltar);
+
           unsigned atom1_mol2=j+center_lista.size();
-          unsigned atom2_mol2=j+center_lista.size()+start_lista.size();
-          Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+          unsigned atom2_mol2=j+2*center_lista.size();
+          unsigned atom3_mol2=j+3*center_lista.size();
+          unsigned atom4_mol2=j+4*center_lista.size();
+
+          Vector mol2_vector1=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2)); 
+          Vector mol2_vector2=pbcDistance(getPosition(atom3_mol2),getPosition(atom4_mol2)); 
+          Vector mol_vector2=crossProduct(mol2_vector1,mol2_vector2); 
           double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
+
           double inv_v2=1./norm_v2;
           double inv_v2_sqr=inv_v2*inv_v2;
           double inv_v1_inv_v2=inv_v1*inv_v2;
           double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-          Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
-          Vector der_mol2=mol_vector1*inv_v1_inv_v2-cosAngle*mol_vector2*inv_v2_sqr;
+
+          Vector der_cosTheta_mol1_vector1;
+          der_cosTheta_mol1_vector1[0]=(-mol1_vector2[2]*mol_vector2[1]+mol1_vector2[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[2]*mol_vector1[1]+mol1_vector2[1]*mol_vector1[2]);
+          der_cosTheta_mol1_vector1[1]=( mol1_vector2[2]*mol_vector2[0]-mol1_vector2[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector2[2]*mol_vector1[0]-mol1_vector2[0]*mol_vector1[2]);
+          der_cosTheta_mol1_vector1[2]=(-mol1_vector2[1]*mol_vector2[0]+mol1_vector2[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector2[1]*mol_vector1[0]+mol1_vector2[0]*mol_vector1[1]);
+
+          Vector der_cosTheta_mol1_vector2;
+          der_cosTheta_mol1_vector2[0]=( mol1_vector1[2]*mol_vector2[1]-mol1_vector1[1]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[2]*mol_vector1[1]-mol1_vector1[1]*mol_vector1[2]);
+          der_cosTheta_mol1_vector2[1]=(-mol1_vector1[2]*mol_vector2[0]+mol1_vector1[0]*mol_vector2[2])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*(-mol1_vector1[2]*mol_vector1[0]+mol1_vector1[0]*mol_vector1[2]);
+          der_cosTheta_mol1_vector2[2]=( mol1_vector1[1]*mol_vector2[0]-mol1_vector1[0]*mol_vector2[1])*inv_v1_inv_v2 -cosAngle*inv_v1_sqr*( mol1_vector1[1]*mol_vector1[0]-mol1_vector1[0]*mol_vector1[1]);
+
+          Vector der_cosTheta_mol2_vector1;
+          der_cosTheta_mol2_vector1[0]=(-mol2_vector2[2]*mol_vector1[1]+mol2_vector2[1]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector2[2]*mol_vector2[1]+mol2_vector2[1]*mol_vector2[2]);
+          der_cosTheta_mol2_vector1[1]=( mol2_vector2[2]*mol_vector1[0]-mol2_vector2[0]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector2[2]*mol_vector2[0]-mol2_vector2[0]*mol_vector2[2]);
+          der_cosTheta_mol2_vector1[2]=(-mol2_vector2[1]*mol_vector1[0]+mol2_vector2[0]*mol_vector1[1])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector2[1]*mol_vector2[0]+mol2_vector2[0]*mol_vector2[1]);
+
+          Vector der_cosTheta_mol2_vector2;
+          der_cosTheta_mol2_vector2[0]=( mol2_vector1[2]*mol_vector1[1]-mol2_vector1[1]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector1[2]*mol_vector2[1]-mol2_vector1[1]*mol_vector2[2]);
+          der_cosTheta_mol2_vector2[1]=(-mol2_vector1[2]*mol_vector1[0]+mol2_vector1[0]*mol_vector1[2])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*(-mol2_vector1[2]*mol_vector2[0]+mol2_vector1[0]*mol_vector2[2]);
+          der_cosTheta_mol2_vector2[2]=( mol2_vector1[1]*mol_vector1[0]-mol2_vector1[0]*mol_vector1[1])*inv_v1_inv_v2 -cosAngle*inv_v2_sqr*( mol2_vector1[1]*mol_vector2[0]-mol2_vector1[0]*mol_vector2[1]);
+
           if (doUpDownSymmetry && cosAngle<0) {
-             der_mol1 *= -1.;
-             der_mol2 *= -1.;
+             der_cosTheta_mol1_vector1 *= -1.;
+             der_cosTheta_mol1_vector2 *= -1.;
+             der_cosTheta_mol2_vector1 *= -1.;
+             der_cosTheta_mol2_vector2 *= -1.;
           }
+
           unsigned binAngle;
           if (doUpDownSymmetry && cosAngle<0) {
              binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
@@ -700,29 +857,38 @@ void PairOrientationalEntropy::calculate()
                } else {
                   h=l;
                }
+               Vector value1;
                vector<double> dfunc(2);
                if (l==(nhist_[1]-1) || l==0) {
                   gofr[k][h] += kernel(pos,2*invNormKernel,dfunc);
                } else {
                   gofr[k][h] += kernel(pos,invNormKernel,dfunc);
                }
-               Vector value1 = dfunc[0]*distance_versor;
-               Vector value2_mol1 = dfunc[1]*der_mol1;
-               Vector value2_mol2 = dfunc[1]*der_mol2;
-
+               value1 = dfunc[0]*distance_versor;
+               Vector value2_mol1_vector1 = dfunc[1]*der_cosTheta_mol1_vector1;
+               Vector value2_mol1_vector2 = dfunc[1]*der_cosTheta_mol1_vector2;
+               Vector value2_mol2_vector1 = dfunc[1]*der_cosTheta_mol2_vector1;
+               Vector value2_mol2_vector2 = dfunc[1]*der_cosTheta_mol2_vector2;
+                 
                gofrPrimeCenter[i*nhist1_nhist2_+k*nhist_[1]+h] += value1;
-               gofrPrimeStart[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1;
-               gofrPrimeEnd[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1;
-
+               gofrPrimeStart1[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector1;
+               gofrPrimeEnd1[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector1;
+               gofrPrimeStart2[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1_vector2;
+               gofrPrimeEnd2[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1_vector2;
 
                gofrPrimeCenter[j*nhist1_nhist2_+k*nhist_[1]+h] -= value1;
-               gofrPrimeStart[j*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2;
-               gofrPrimeEnd[j*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2;
+               gofrPrimeStart1[j*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2_vector1;
+               gofrPrimeEnd1[j*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2_vector1;
+               gofrPrimeStart2[j*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol2_vector2;
+               gofrPrimeEnd2[j*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol2_vector2;
 
                Tensor vv1(value1, distance);
-               Tensor vv2_mol1(value2_mol1, mol_vector1);
-               Tensor vv2_mol2(value2_mol2, mol_vector2);
-               gofrVirial[k][h] += vv1 + vv2_mol1 + vv2_mol2;
+               Tensor vv2_mol1_vector1(value2_mol1_vector1, mol1_vector1);
+               Tensor vv2_mol1_vector2(value2_mol1_vector2, mol1_vector2);
+               Tensor vv2_mol2_vector1(value2_mol2_vector1, mol2_vector1);
+               Tensor vv2_mol2_vector2(value2_mol2_vector2, mol2_vector2);
+
+               gofrVirial[k][h] += vv1 + vv2_mol1_vector1 + vv2_mol1_vector2+ vv2_mol2_vector1 + vv2_mol2_vector2;
             }
           }
         }
@@ -737,8 +903,10 @@ void PairOrientationalEntropy::calculate()
        comm.Sum(gofrVirial);
        if (!doLowComm) {
           comm.Sum(gofrPrimeCenter);
-          comm.Sum(gofrPrimeStart);
-          comm.Sum(gofrPrimeEnd);
+          comm.Sum(gofrPrimeStart1);
+          comm.Sum(gofrPrimeEnd1);
+          comm.Sum(gofrPrimeStart2);
+          comm.Sum(gofrPrimeEnd2);
        }
     }
   }
@@ -788,44 +956,60 @@ void PairOrientationalEntropy::calculate()
        for(unsigned int k=0;k<nl->getNumberOfLocalAtoms();k+=1) {
          unsigned index=nl->getIndexOfLocalAtom(k);
          // Center atom
-         unsigned start_atom=index+center_lista.size();
-         unsigned end_atom=index+center_lista.size()+start_lista.size();
+         unsigned start1_atom=index+center_lista.size();
+         unsigned end1_atom=index+2*center_lista.size();
+         unsigned start2_atom=index+3*center_lista.size();
+         unsigned end2_atom=index+4*center_lista.size();
          Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
-         Matrix<Vector> integrandDerivativesStart(nhist_[0],nhist_[1]);
-         Matrix<Vector> integrandDerivativesEnd(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart1(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd1(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart2(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd2(nhist_[0],nhist_[1]);
          for(unsigned i=0;i<nhist_[0];++i){
            for(unsigned j=0;j<nhist_[1];++j){
              if (gofr[i][j]>1.e-10) {
                integrandDerivatives[i][j] = gofrPrimeCenter[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-               integrandDerivativesStart[i][j] = gofrPrimeStart[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-               integrandDerivativesEnd[i][j] = gofrPrimeEnd[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart1[i][j] = gofrPrimeStart1[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd1[i][j] = gofrPrimeEnd1[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart2[i][j] = gofrPrimeStart2[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd2[i][j] = gofrPrimeEnd2[index*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
              }
            }
          }
          deriv[index] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
-         deriv[start_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart,delta);
-         deriv[end_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd,delta);
+         deriv[start1_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart1,delta);
+         deriv[end1_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd1,delta);
+         deriv[start2_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart2,delta);
+         deriv[end2_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd2,delta);
        }
     } else {
        for(unsigned int k=rank;k<center_lista.size();k+=stride) {
          // Center atom
-         unsigned start_atom=k+center_lista.size();
-         unsigned end_atom=k+center_lista.size()+start_lista.size();
+         unsigned start1_atom=k+center_lista.size();
+         unsigned end1_atom=k+2*center_lista.size();
+         unsigned start2_atom=k+3*center_lista.size();
+         unsigned end2_atom=k+4*center_lista.size();
          Matrix<Vector> integrandDerivatives(nhist_[0],nhist_[1]);
-         Matrix<Vector> integrandDerivativesStart(nhist_[0],nhist_[1]);
-         Matrix<Vector> integrandDerivativesEnd(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart1(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd1(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesStart2(nhist_[0],nhist_[1]);
+         Matrix<Vector> integrandDerivativesEnd2(nhist_[0],nhist_[1]);
          for(unsigned i=0;i<nhist_[0];++i){
            for(unsigned j=0;j<nhist_[1];++j){
              if (gofr[i][j]>1.e-10) {
                integrandDerivatives[i][j] = gofrPrimeCenter[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-               integrandDerivativesStart[i][j] = gofrPrimeStart[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
-               integrandDerivativesEnd[i][j] = gofrPrimeEnd[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart1[i][j] = gofrPrimeStart1[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd1[i][j] = gofrPrimeEnd1[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesStart2[i][j] = gofrPrimeStart2[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
+               integrandDerivativesEnd2[i][j] = gofrPrimeEnd2[k*nhist1_nhist2_+i*nhist_[1]+j]*logGofrx1sqr[i][j];
              }
            }
          }
          deriv[k] = -TwoPiDensityVolAngles*integrate(integrandDerivatives,delta);
-         deriv[start_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart,delta);
-         deriv[end_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd,delta);
+         deriv[start1_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart1,delta);
+         deriv[end1_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd1,delta);
+         deriv[start2_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesStart2,delta);
+         deriv[end2_atom] = -TwoPiDensityVolAngles*integrate(integrandDerivativesEnd2,delta);
        }
     }
     if(!serial){
@@ -861,7 +1045,7 @@ void PairOrientationalEntropy::calculate()
   setBoxDerivatives  (virial);
 }
 
-double PairOrientationalEntropy::kernel(vector<double> distance, double invNormKernel, vector<double>&der)const{
+double PairOrientationalEntropyPerpendicular::kernel(vector<double> distance, double invNormKernel, vector<double>&der)const{
   // Gaussian function and derivative
   double result = invNormKernel*std::exp(-distance[0]*distance[0]/twoSigma1Sqr-distance[1]*distance[1]/twoSigma2Sqr) ;
   //double result = invTwoPiSigma1Sigma2*std::exp(-distance[0]*distance[0]/twoSigma1Sqr-distance[1]*distance[1]/twoSigma2Sqr) ;
@@ -870,7 +1054,7 @@ double PairOrientationalEntropy::kernel(vector<double> distance, double invNormK
   return result;
 }
 
-double PairOrientationalEntropy::integrate(Matrix<double> integrand, vector<double> delta)const{
+double PairOrientationalEntropyPerpendicular::integrate(Matrix<double> integrand, vector<double> delta)const{
   // Trapezoid rule
   double result = 0.;
   for(unsigned i=1;i<(nhist_[0]-1);++i){
@@ -897,7 +1081,7 @@ double PairOrientationalEntropy::integrate(Matrix<double> integrand, vector<doub
   return result;
 }
 
-Vector PairOrientationalEntropy::integrate(Matrix<Vector> integrand, vector<double> delta)const{
+Vector PairOrientationalEntropyPerpendicular::integrate(Matrix<Vector> integrand, vector<double> delta)const{
   // Trapezoid rule
   Vector result;
   for(unsigned i=1;i<(nhist_[0]-1);++i){
@@ -924,7 +1108,7 @@ Vector PairOrientationalEntropy::integrate(Matrix<Vector> integrand, vector<doub
   return result;
 }
 
-Tensor PairOrientationalEntropy::integrate(Matrix<Tensor> integrand, vector<double> delta)const{
+Tensor PairOrientationalEntropyPerpendicular::integrate(Matrix<Tensor> integrand, vector<double> delta)const{
   // Trapezoid rule
   Tensor result;
   for(unsigned i=1;i<(nhist_[0]-1);++i){
@@ -951,7 +1135,7 @@ Tensor PairOrientationalEntropy::integrate(Matrix<Tensor> integrand, vector<doub
   return result;
 }
 
-void PairOrientationalEntropy::outputGofr(Matrix<double> gofr, const char* fileName) {
+void PairOrientationalEntropyPerpendicular::outputGofr(Matrix<double> gofr, const char* fileName) {
   for(unsigned i=0;i<nhist_[0];++i){
      for(unsigned j=0;j<nhist_[1];++j){
         gofrOfile.printField("r",x1[i]).printField("theta",x2[j]).printField("gofr",gofr[i][j]).printField();

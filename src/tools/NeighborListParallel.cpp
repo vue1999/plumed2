@@ -306,7 +306,7 @@ void NeighborListParallel::updateHalfList(const vector<Vector>& positions) {
   const double d2=distance_*distance_;
   neighbors_.resize(nlist0_);
   if (!twolists_) {
-    for(unsigned int i=mpi_rank;i<(nlist0_-1);i+=mpi_stride) {
+    for(unsigned int i=mpi_rank;i<nlist0_;i+=mpi_stride) {
        local_atoms_.push_back(i);
        Vector position_i=positions[i];
        for(unsigned int j=i+1;j<nlist0_;j+=1) {
