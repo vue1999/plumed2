@@ -24,6 +24,7 @@
 #include "tools/NeighborListParallel.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
+#include "tools/IFile.h"
 
 #include <string>
 #include <math.h>
@@ -89,6 +90,10 @@ class PairOrientationalEntropyPerpendicular : public Colvar {
   int outputStride;
   bool doOutputGofr, doOutputIntegrand;
   mutable PLMD::OFile gofrOfile;
+  // Reference g(r)
+  bool doReferenceGofr;
+  Matrix<double> referenceGofr;
+  double epsilon;
   // Average gofr
   Matrix<double> avgGofr;
   unsigned iteration;
@@ -130,6 +135,7 @@ void PairOrientationalEntropyPerpendicular::registerKeywords( Keywords& keys ){
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
+  keys.add("optional","REFERENCE_GOFR_FNAME","the name of the file with the reference g(r)");
   keys.addFlag("LOW_COMM",false,"Use an algorithm with less communication between processors");
 }
 
@@ -222,6 +228,25 @@ firsttime(true)
   if (outputStride!=1 && !doOutputGofr && !doOutputIntegrand) error("Cannot specify OUTPUT_STRIDE if OUTPUT_GOFR or OUTPUT_INTEGRAND not used");
   if (outputStride<1) error("The output stride specified with OUTPUT_STRIDE must be greater than or equal to one.");
   if (outputStride>1) log.printf("  The output stride to write g(r) or the integrand is %d \n", outputStride);
+
+  doReferenceGofr=false;
+  std::string referenceGofrFileName;
+  parse("REFERENCE_GOFR_FNAME",referenceGofrFileName); 
+  if (!referenceGofrFileName.empty() ) {
+    epsilon=1.e-8;
+    log.printf("  Reading a reference g(r) from the file %s . \n", referenceGofrFileName.c_str() );
+    doReferenceGofr=true;
+    IFile ifile; 
+    ifile.link(*this);
+    ifile.open(referenceGofrFileName);
+    referenceGofr.resize(nhist_[0],nhist_[1]);
+    for(unsigned int i=0;i<nhist_[0];i++) {
+       for(unsigned int j=0;j<nhist_[1];j++) {
+       double tmp_r, tmp_theta;
+       ifile.scanField("r",tmp_r).scanField("theta",tmp_theta).scanField("gofr",referenceGofr[i][j]).scanField();
+       }
+    }
+  }
 
   doAverageGofr=false;
   parseFlag("AVERAGE_GOFR",doAverageGofr);
@@ -933,11 +958,20 @@ void PairOrientationalEntropyPerpendicular::calculate()
   Matrix<double> logGofrx1sqr(nhist_[0],nhist_[1]);
   for(unsigned i=0;i<nhist_[0];++i){
      for(unsigned j=0;j<nhist_[1];++j){
-        logGofrx1sqr[i][j] = std::log(gofr[i][j])*x1sqr[i];
-        if (gofr[i][j]<1.e-10) {
-           integrand[i][j] = x1sqr[i];
+        if (doReferenceGofr) {
+           if (gofr[i][j]<1.e-10) {
+              integrand[i][j] = (referenceGofr[i][j]+epsilon)*x1sqr[i];
+           } else {
+              logGofrx1sqr[i][j] = std::log(gofr[i][j]/(referenceGofr[i][j]+epsilon))*x1sqr[i];
+              integrand[i][j] = gofr[i][j]*logGofrx1sqr[i][j]+(-gofr[i][j]+referenceGofr[i][j]+epsilon)*x1sqr[i];
+           }
         } else {
-           integrand[i][j] = gofr[i][j]*logGofrx1sqr[i][j]+(-gofr[i][j]+1)*x1sqr[i];
+           if (gofr[i][j]<1.e-10) {
+              integrand[i][j] = x1sqr[i];
+           } else {
+              logGofrx1sqr[i][j] = std::log(gofr[i][j])*x1sqr[i];
+              integrand[i][j] = gofr[i][j]*logGofrx1sqr[i][j]+(-gofr[i][j]+1)*x1sqr[i];
+           }
         }
      }
   }
@@ -1032,7 +1066,11 @@ void PairOrientationalEntropyPerpendicular::calculate()
     Matrix<double> integrandVirialVolume(nhist_[0],nhist_[1]);
     for(unsigned i=0;i<nhist_[0];++i){
        for(unsigned j=0;j<nhist_[1];++j){
-          integrandVirialVolume[i][j] = (-gofr[i][j]+1)*x1sqr[i];
+          if (doReferenceGofr) {
+            integrandVirialVolume[i][j] = (-gofr[i][j]+referenceGofr[i][j]+epsilon)*x1sqr[i];
+          } else {
+            integrandVirialVolume[i][j] = (-gofr[i][j]+1)*x1sqr[i];
+          }
        }
     }
     // Integrate virial
