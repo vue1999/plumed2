@@ -94,6 +94,7 @@ class PairOrientationalEntropyPerpendicular : public Colvar {
   bool doReferenceGofr;
   Matrix<double> referenceGofr;
   double epsilon;
+  double densityReference;
   // Average gofr
   Matrix<double> avgGofr;
   unsigned iteration;
@@ -136,6 +137,7 @@ void PairOrientationalEntropyPerpendicular::registerKeywords( Keywords& keys ){
   keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
   keys.add("optional","REFERENCE_GOFR_FNAME","the name of the file with the reference g(r)");
+  keys.add("optional","REFERENCE_GOFR_DENSITY","Density to be used with the reference g(r). If not specified or less than 0, the current density is used. Using the current density might lead in large changes of the box volume.");
   keys.addFlag("LOW_COMM",false,"Use an algorithm with less communication between processors");
 }
 
@@ -229,6 +231,8 @@ firsttime(true)
   if (outputStride<1) error("The output stride specified with OUTPUT_STRIDE must be greater than or equal to one.");
   if (outputStride>1) log.printf("  The output stride to write g(r) or the integrand is %d \n", outputStride);
 
+  densityReference=-1.;
+  parse("REFERENCE_GOFR_DENSITY",densityReference);
   doReferenceGofr=false;
   std::string referenceGofrFileName;
   parse("REFERENCE_GOFR_FNAME",referenceGofrFileName); 
@@ -246,6 +250,7 @@ firsttime(true)
        ifile.scanField("r",tmp_r).scanField("theta",tmp_theta).scanField("gofr",referenceGofr[i][j]).scanField();
        }
     }
+    if (densityReference>0) log.printf("  Using a density reference of %f .\n", densityReference);
   }
 
   doAverageGofr=false;
@@ -978,7 +983,9 @@ void PairOrientationalEntropyPerpendicular::calculate()
   vector<double> delta(2);
   delta[0]=deltar;
   delta[1]=deltaCosAngle;
-  double TwoPiDensityVolAngles=(2*pi/volumeOfAngles)*density;
+  double TwoPiDensityVolAngles;
+  if (doReferenceGofr && densityReference>0) TwoPiDensityVolAngles=(2*pi/volumeOfAngles)*densityReference;
+  else TwoPiDensityVolAngles=(2*pi/volumeOfAngles)*density;
   double pairEntropy=-TwoPiDensityVolAngles*integrate(integrand,delta);
   //std::cout << "Integrand and integration: " << float( clock () - begin_time ) << "\n";
   //begin_time = clock();
@@ -1066,7 +1073,9 @@ void PairOrientationalEntropyPerpendicular::calculate()
     Matrix<double> integrandVirialVolume(nhist_[0],nhist_[1]);
     for(unsigned i=0;i<nhist_[0];++i){
        for(unsigned j=0;j<nhist_[1];++j){
-          if (doReferenceGofr) {
+          if (doReferenceGofr && densityReference>0) {
+            integrandVirialVolume[i][j] = -gofr[i][j]*logGofrx1sqr[i][j];
+          } else if (doReferenceGofr && densityReference<0) {
             integrandVirialVolume[i][j] = (-gofr[i][j]+referenceGofr[i][j]+epsilon)*x1sqr[i];
           } else {
             integrandVirialVolume[i][j] = (-gofr[i][j]+1)*x1sqr[i];
