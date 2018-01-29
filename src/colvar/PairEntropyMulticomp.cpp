@@ -95,6 +95,13 @@ class PairEntropyMulticomp : public Colvar {
   bool doOutputGofr;
   bool doOutputIntegrand;
   unsigned outputStride;
+  // Average g(r)
+  bool doAverageGofr;
+  vector<double> avgGofrAA;
+  vector<double> avgGofrAB;
+  vector<double> avgGofrBB;
+  unsigned iteration;
+  unsigned averageGofrTau;
   // Kernel to calculate g(r)
   double kernel(double distance, double&der)const;
 public:
@@ -124,6 +131,8 @@ void PairEntropyMulticomp::registerKeywords( Keywords& keys ){
   keys.add("compulsory","MAXR","1","Maximum distance for the radial distribution function ");
   keys.add("optional","NHIST","Number of bins in the rdf ");
   keys.add("compulsory","SIGMA","0.1","Width of gaussians ");
+  keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
+  keys.add("optional","AVERAGE_GOFR_TAU","Characteristic length of a window in which to average the g(r). It is in units of iterations and should be an integer. Zero corresponds to an normal average (infinite window).");
   keys.addOutputComponent("pairAA","INDIVIDUAL_PAIRS","Pair AA contribution to the multicomponent pair entropy");
   keys.addOutputComponent("pairAB","INDIVIDUAL_PAIRS","Pair AB contribution to the multicomponent pair entropy");
   keys.addOutputComponent("pairBB","INDIVIDUAL_PAIRS","Pair BB contribution to the multicomponent pair entropy");
@@ -231,6 +240,22 @@ firsttimeBB(true)
   if (outputStride<1) error("The output stride specified with OUTPUT_STRIDE must be greater than or equal to one.");
   if (outputStride>1) log.printf("  The output stride to write g(r) or the integrand is %d \n", outputStride);
 
+
+  doAverageGofr=false;
+  parseFlag("AVERAGE_GOFR",doAverageGofr);
+  if (doAverageGofr) {
+     iteration = 1;
+     avgGofrAA.resize(nhist);
+     avgGofrAB.resize(nhist);
+     avgGofrBB.resize(nhist);
+  }
+  averageGofrTau=0;
+  parse("AVERAGE_GOFR_TAU",averageGofrTau);
+  if (averageGofrTau!=0 && !doAverageGofr) error("AVERAGE_GOFR_TAU specified but AVERAGE_GOFR not given. Specify AVERAGE_GOFR or remove AVERAGE_GOFR_TAU");
+  if (doAverageGofr && averageGofrTau==0) log.printf("The g(r) will be averaged over all frames \n");
+  if (doAverageGofr && averageGofrTau!=0) log.printf("The g(r) will be averaged with a window of %d steps \n", averageGofrTau);
+
+
   parseFlag("INDIVIDUAL_PAIRS",do_pairs);
   if (do_pairs) log.printf("  The AA, AB, and BB contributions will be computed separately \n");
 
@@ -260,7 +285,7 @@ firsttimeBB(true)
   invSqrt2piSigma = 1./sqrt2piSigma;
   sigmaSqr2 = 2.*sigma*sigma;
   sigmaSqr = sigma*sigma;
-  deltar=maxr/nhist;
+  deltar=maxr/(nhist-1.);
   deltaBin = std::floor(3*sigma/deltar); // 3*sigma is hard coded
 
   vectorX.resize(nhist);
@@ -623,6 +648,23 @@ void PairEntropyMulticomp::calculate()
     }
   }
   */
+  // Average g(r)s
+  if (doAverageGofr) {
+     if (!doNotCalculateDerivatives()) error("Cannot calculate derivatives or bias using the AVERAGE_GOFR option");
+     double factor;
+     if (averageGofrTau==0 || iteration < averageGofrTau) {
+        iteration += 1;
+        factor = 1./( (double) iteration );
+     } else factor = 2./((double) averageGofrTau + 1.);
+     for(unsigned i=0;i<nhist;++i){
+        avgGofrAA[i] += (gofrAA[i]-avgGofrAA[i])*factor;
+        gofrAA[i] = avgGofrAA[i];
+        avgGofrAB[i] += (gofrAB[i]-avgGofrAB[i])*factor;
+        gofrAB[i] = avgGofrAB[i];
+        avgGofrBB[i] += (gofrBB[i]-avgGofrBB[i])*factor;
+        gofrBB[i] = avgGofrBB[i];
+     }
+  }
   // Output of gofrs
   if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofrAA,gofrAB,gofrBB);
   // Construct integrands
