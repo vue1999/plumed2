@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2013-2017 The plumed team
+   Copyright (c) 2013-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -35,10 +35,6 @@ MultiDomainRMSD::MultiDomainRMSD( const ReferenceConfigurationOptions& ro ):
 {
 }
 
-MultiDomainRMSD::~MultiDomainRMSD() {
-  for(unsigned i=0; i<domains.size(); ++i) delete domains[i];
-}
-
 void MultiDomainRMSD::read( const PDB& pdb ) {
   unsigned nblocks =  pdb.getNumberOfAtomBlocks();
   if( nblocks<2 ) error("multidomain RMSD only has one block of atoms");
@@ -60,7 +56,7 @@ void MultiDomainRMSD::read( const PDB& pdb ) {
       parse("UPPER_CUTOFF"+num,upper,true);
       nopbc=false; parseFlag("NOPBC"+num,nopbc);
     }
-    domains.push_back( metricRegister().create<SingleDomainRMSD>( ftype ) );
+    domains.emplace_back( metricRegister().create<SingleDomainRMSD>( ftype ) );
     positions.resize( blocks[i] - blocks[i-1] );
     align.resize( blocks[i] - blocks[i-1] );
     displace.resize( blocks[i] - blocks[i-1] );

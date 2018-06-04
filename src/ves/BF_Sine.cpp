@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2016-2017 The VES code team
+   Copyright (c) 2016-2018 The VES code team
    (see the PEOPLE-VES file at the root of this folder for a list of names)
 
    See http://www.ves-code.org for more information.
@@ -54,6 +54,15 @@ f_{n}(x) &= sin(n \cdot \frac{2\pi}{P} x) \\
 f_{N}(x)   &= sin(N \cdot \frac{2\pi}{P} x) \\
 \f}
 where \f$P=(b-a)\f$ is the periodicity of the interval.
+They are orthogonal over the interval \f$[a,b]\f$
+\f[
+\int_{a}^{b} dx \, f_{n}(x)\, f_{m}(x)  =
+\begin{cases}
+0 & n \neq m \\
+(b-a) & n = m = 0 \\
+(b-a)/2 & n = m \neq 0
+\end{cases}.
+\f]
 
 \par Examples
 

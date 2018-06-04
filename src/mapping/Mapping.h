@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2013-2017 The plumed team
+   Copyright (c) 2013-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -28,6 +28,7 @@
 #include "vesselbase/ActionWithVessel.h"
 #include "reference/PointWiseMapping.h"
 #include <vector>
+#include <memory>
 
 namespace PLMD {
 
@@ -46,7 +47,7 @@ private:
 //  The derivative wrt to the distance from the frame
   std::vector<double> dfframes;
 /// This holds all the reference information
-  PointWiseMapping* mymap;
+  std::unique_ptr<PointWiseMapping> mymap;
 /// The forces on each of the derivatives (used in apply)
   std::vector<double> forcesToApply;
 protected:
@@ -69,7 +70,6 @@ protected:
 public:
   static void registerKeywords( Keywords& keys );
   explicit Mapping(const ActionOptions&);
-  ~Mapping();
 /// Overload the virtual functions that appear in both ActionAtomistic and ActionWithArguments
   void turnOnDerivatives();
   void calculateNumericalDerivatives( ActionWithValue* a=NULL );
@@ -95,8 +95,6 @@ public:
   std::string getArgumentName( unsigned& iarg );
 /// Get the value of the ith property for the current frame
   double getPropertyValue( const unsigned& current, const unsigned& iprop ) const ;
-/// Stuff to do before we do the calculation
-  void prepare();
 /// Apply the forces
   void apply();
 };

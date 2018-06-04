@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2012-2017 The plumed team
+   Copyright (c) 2012-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -23,12 +23,16 @@
 #define __PLUMED_tools_BiasRepresentation_h
 
 #include "Exception.h"
-#include "KernelFunctions.h"
-#include "File.h"
-#include "Grid.h"
 #include <memory>
+#include <vector>
 
 namespace PLMD {
+
+class Value;
+class Grid;
+class IFile;
+class KernelFunctions;
+class Communicator;
 
 //+PLUMEDOC INTERNAL biasrepresentation
 /*
@@ -76,7 +80,7 @@ public:
   /// get the pointer to the grid
   Grid* 	getGridPtr();
   /// get a new histogram point from a file
-  KernelFunctions* readFromPoint(IFile *ifile);
+  std::unique_ptr<KernelFunctions> readFromPoint(IFile *ifile);
   /// get an automatic min/max from the set so to know how to configure the grid
   void getMinMaxBin(std::vector<double> &vmin, std::vector<double> &vmax, std::vector<unsigned> &vbin);
   /// clear the representation (grid included)

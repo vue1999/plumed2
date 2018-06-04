@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2013-2017 The plumed team
+   Copyright (c) 2013-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -30,6 +30,7 @@
 #include "AtomValuePack.h"
 #include <vector>
 #include <string>
+#include <limits>
 
 using namespace std;
 
@@ -765,7 +766,7 @@ void MultiColvarBase::calculate() {
   if( !usespecies && ablocks.size()>1 ) {
     // This loop finds the first active atom, which is always checked because
     // of a peculiarity in linkcells
-    unsigned first_active;
+    unsigned first_active=std::numeric_limits<unsigned>::max();
     for(unsigned i=0; i<ablocks[0].size(); ++i) {
       if( !isCurrentlyActive( ablocks[1][i] ) ) continue;
       else {

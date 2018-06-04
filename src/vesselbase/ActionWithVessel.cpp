@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2012-2017 The plumed team
+   Copyright (c) 2012-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -56,7 +56,6 @@ ActionWithVessel::ActionWithVessel(const ActionOptions&ao):
   noderiv(true),
   actionIsBridged(false),
   nactive_tasks(0),
-  stopwatch_fwd(new Stopwatch),
   dertime_can_be_off(false),
   dertime(true),
   contributorsAreUnlocked(false),
@@ -91,7 +90,6 @@ ActionWithVessel::ActionWithVessel(const ActionOptions&ao):
 }
 
 ActionWithVessel::~ActionWithVessel() {
-  for(unsigned i=0; i<functions.size(); ++i) delete functions[i];
   stopwatch.start(); stopwatch.stop();
   if(timers) {
     log.printf("timings for action %s with label %s \n", getName().c_str(), getLabel().c_str() );
@@ -111,24 +109,38 @@ void ActionWithVessel::addVessel( const std::string& name, const std::string& in
 }
 
 void ActionWithVessel::addVessel( Vessel* vv ) {
-  ShortcutVessel* sv=dynamic_cast<ShortcutVessel*>(vv);
-  if(!sv) { vv->checkRead(); functions.push_back(vv); }
-  else { delete sv; return; }
+// logically, this function should accept a unique_ptr.
+// temporarily, we make here the conversion:
+  std::unique_ptr<Vessel> vv_ptr(vv);
 
-  StoreDataVessel* mm=dynamic_cast<StoreDataVessel*>( vv );
+// In the original code, the dynamically casted pointer was deleted here.
+// Now that vv_ptr is a unique_ptr, the object will be deleted automatically when
+// exiting this routine.
+  if(dynamic_cast<ShortcutVessel*>(vv_ptr.get())) return;
+
+  vv_ptr->checkRead();
+
+  StoreDataVessel* mm=dynamic_cast<StoreDataVessel*>( vv_ptr.get() );
   if( mydata && mm ) error("cannot have more than one StoreDataVessel in one action");
   else if( mm ) mydata=mm;
   else dertime_can_be_off=false;
+
+// Ownership is transfered to functions
+  functions.emplace_back(std::move(vv_ptr));
 }
 
 BridgeVessel* ActionWithVessel::addBridgingVessel( ActionWithVessel* tome ) {
   VesselOptions da("","",0,"",this);
-  BridgeVessel* bv=new BridgeVessel(da);
+  std::unique_ptr<BridgeVessel> bv(new BridgeVessel(da));
   bv->setOutputAction( tome );
   tome->actionIsBridged=true; dertime_can_be_off=false;
-  functions.push_back( dynamic_cast<Vessel*>(bv) );
+// store this pointer in order to return it later.
+// notice that I cannot access this with functions.tail().get()
+// since functions contains pointers to a different class (Vessel)
+  auto toBeReturned=bv.get();
+  functions.emplace_back( std::move(bv) );
   resizeFunctions();
-  return bv;
+  return toBeReturned;
 }
 
 StoreDataVessel* ActionWithVessel::buildDataStashes( ActionWithVessel* actionThatUses ) {
@@ -219,7 +231,7 @@ void ActionWithVessel::lockContributors() {
   }
   plumed_dbg_assert( n==nactive_tasks );
   for(unsigned i=0; i<functions.size(); ++i) {
-    BridgeVessel* bb = dynamic_cast<BridgeVessel*>( functions[i] );
+    BridgeVessel* bb = dynamic_cast<BridgeVessel*>( functions[i].get() );
     if( bb ) bb->copyTaskFlags();
   }
   // Resize mydata to accomodate all active tasks
@@ -385,7 +397,7 @@ Vessel* ActionWithVessel::getVesselWithName( const std::string& mynam ) {
       else error("found more than one " + mynam + " object in action");
     }
   }
-  return functions[target];
+  return functions[target].get();
 }
 
 }

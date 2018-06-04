@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2012-2017 The plumed team
+   Copyright (c) 2012-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -54,8 +54,7 @@ SetupMolInfo::~SetupMolInfo() {
 SetupMolInfo::SetupMolInfo( const ActionOptions&ao ):
   Action(ao),
   ActionSetup(ao),
-  ActionAtomistic(ao),
-  pdb_fwd(new(PDB))
+  ActionAtomistic(ao)
 {
   // Read what is contained in the pdb file
   parse("MOLTYPE",mytype);

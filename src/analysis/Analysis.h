@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2012-2017 The plumed team
+   Copyright (c) 2012-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -55,12 +55,6 @@ private:
   unsigned freq;
 /// Number of data point we need to run analysis
   unsigned ndata;
-/// The temperature at which we are running the calculation
-  double simtemp;
-/// The temperature at which we want the histogram
-  double rtemp;
-/// Do we need the energy (are we reweighting at a different temperature)
-  bool needeng;
 /// The piece of data we are inserting
   unsigned idata;
 /// The weights of all the data points
@@ -109,7 +103,6 @@ protected:
 public:
   static void registerKeywords( Keywords& keys );
   explicit Analysis(const ActionOptions&);
-  ~Analysis();
   void calculate() {}
   void apply() {}
   void accumulate();

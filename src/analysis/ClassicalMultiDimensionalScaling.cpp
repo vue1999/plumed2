@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2013-2017 The plumed team
+   Copyright (c) 2013-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -228,14 +228,12 @@ void ClassicalMultiDimensionalScaling::analyzeLandmarks() {
     }
     gfile.printField();
   }
-  gfile.close();
 
   // Output the embedding in plumed format
   if( efilename!="dont output") {
     OFile afile; afile.link(*this); afile.setBackupString("analysis");
     afile.open( efilename.c_str() );
     myembedding->print( "classical mds", getTime(), afile, getOutputFormat(), atoms.getUnits().getLength()/0.1 );
-    afile.close();
   }
 }
 

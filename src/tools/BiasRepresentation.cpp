@@ -1,5 +1,5 @@
 /* +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   Copyright (c) 2012-2017 The plumed team
+   Copyright (c) 2012-2018 The plumed team
    (see the PEOPLE file at the root of the distribution for a list of names)
 
    See http://www.plumed.org for more information.
@@ -23,6 +23,10 @@
 #include "core/Value.h"
 #include "Communicator.h"
 #include <iostream>
+#include "KernelFunctions.h"
+#include "File.h"
+#include "Grid.h"
+
 
 namespace PLMD {
 
@@ -115,24 +119,24 @@ Value*  BiasRepresentation::getPtrToValue(unsigned i) {
   return values[i];
 }
 
-KernelFunctions* BiasRepresentation::readFromPoint(IFile *ifile) {
+std::unique_ptr<KernelFunctions> BiasRepresentation::readFromPoint(IFile *ifile) {
   vector<double> cc( names.size() );
   for(unsigned i=0; i<names.size(); ++i) {
     ifile->scanField(names[i],cc[i]);
   }
   double h=1.0;
-  return new KernelFunctions(cc,histosigma,"gaussian","DIAGONAL",h);
+  return std::unique_ptr<KernelFunctions>( new KernelFunctions(cc,histosigma,"gaussian","DIAGONAL",h) );
 }
 void BiasRepresentation::pushKernel( IFile *ifile ) {
   std::unique_ptr<KernelFunctions> kk;
   // here below the reading of the kernel is completely hidden
   if(histosigma.size()==0) {
     ifile->allowIgnoredFields();
-    kk.reset(KernelFunctions::read(ifile,true,names));
+    kk=KernelFunctions::read(ifile,true,names);
   } else {
     // when doing histogram assume gaussian with a given diagonal sigma
     // and neglect all the rest
-    kk.reset(readFromPoint(ifile));
+    kk=readFromPoint(ifile);
   }
   // the bias factor is not something about the kernels but
   // must be stored to keep the  bias/free energy duality
