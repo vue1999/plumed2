@@ -204,9 +204,9 @@ firsttimeBB(true)
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 3*SIGMA");
     nl_skin=nl_cut-maxr;
   }
-  nhist=ceil(maxr/sigma) + 1; // Default value
+  nhist=ceil(maxr/(sigma/2.)) + 1; // Default value
   parse("NHIST",nhist);
-  log.printf("  The interval is partitioned in %u equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
+  log.printf("  The interval is partitioned in %d equal parts and the integration is perfromed with the trapezoid rule. \n", nhist );
  
   // Construct full list 
   full_lista.reserve ( ga_lista.size() + gb_lista.size() );
