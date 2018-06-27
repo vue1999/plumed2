@@ -275,7 +275,7 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
    double r0 = switchingFunction.get_r0();
    double volumeSphere = ( (4./3.)*pi*r0*r0*r0) ;
    // Construct g(r)
-   double countNeigh=0;
+   double countNeigh=1;
    for(unsigned i=1;i<myatoms.getNumberOfAtoms();++i){
       Vector& distance=myatoms.getPosition(i);  
       if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
