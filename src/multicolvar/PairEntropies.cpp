@@ -268,12 +268,12 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
    vector<double> gofr(nhist);
    vector<double> logGofr(nhist);
    Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
-   vector<Vector> deriv(getNumberOfAtoms());
    vector<Tensor> gofrVirial(nhist);
    vector<Vector> densityPrime(getNumberOfAtoms());
    Tensor densityVirial;
    Tensor virial;
    double r0 = switchingFunction.get_r0();
+   double volumeSphere = ( (4./3.)*pi*r0*r0*r0) ;
    // Construct g(r)
    double countNeigh=0;
    for(unsigned i=1;i<myatoms.getNumberOfAtoms();++i){
@@ -302,8 +302,10 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
            if (local_density) {
              double dsw;
              countNeigh += switchingFunction.calculateSqr( d2 , dsw );
-             densityPrime[i] = (dsw / ( (4./3.)*pi*r0*r0*r0) )*distance;
-             densityVirial += Tensor(densityPrime[i], distance);
+             Vector densityDer = (dsw / volumeSphere)*distance;
+             densityPrime[0] -= densityDer;
+             densityPrime[i] += densityDer;
+             densityVirial -= Tensor(densityDer, distance);
            }
       }
    }
@@ -311,7 +313,7 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
    double volume=getBox().determinant(); 
    double density;
    if (density_given>0) density=density_given;
-   else if (local_density) density= (double) countNeigh / ( (4./3.)*pi*r0*r0*r0);
+   else if (local_density) density = countNeigh / volumeSphere;
    else density=getNumberOfAtoms()/volume;
    //log.printf("rcut %f \n", rcut);
    //log.printf("countNeigh %d \n", countNeigh);
@@ -324,6 +326,7 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
      else gofr[i] /= normConstant;
      if (!doNotCalculateDerivatives()) {
        gofrVirial[i] /= normConstant;
+       if (local_density) gofrVirial[i] -= densityVirial*gofr[i]/density;
        for(unsigned j=0;j<myatoms.getNumberOfAtoms();++j){
          gofrPrime[i][j] /= normConstant;
          if (local_density) gofrPrime[i][j] -= densityPrime[j]*gofr[i]/density;
@@ -383,32 +386,39 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
    }
    // Integrate to obtain pair entropy;
    double pair_entropy = -TwoPiDensity*integrate(integrand,deltar); 
+   vector<Vector> deriv(getNumberOfAtoms());
    if (!doNotCalculateDerivatives()) {
-     // Construct integrand and integrate derivatives
-     for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i) {
-       vector<Vector> integrandDerivatives(nhist);
-       for(unsigned j=0;j<nhist;++j){
-         if (gofr[j]>1.e-10) {
-           integrandDerivatives[j] = gofrPrime[j][i]*logGofr[j]*vectorX2[j];
+     if (!no_two_body) {
+       // Construct integrand and integrate derivatives
+       for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i) {
+         vector<Vector> integrandDerivatives(nhist);
+         for(unsigned j=0;j<nhist;++j){
+           if (gofr[j]>1.e-10) {
+             integrandDerivatives[j] = gofrPrime[j][i]*logGofr[j]*vectorX2[j];
+           }
          }
+         // Integrate
+         deriv[i] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
+         if (local_density) deriv[i] += pair_entropy*densityPrime[i]/density;
        }
-       // Integrate
-       deriv[i] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
-       if (local_density) deriv[i] += pair_entropy*densityPrime[i]/density;
-       if (one_body) deriv[i] += densityPrime[i]/density;
+     }
+     for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i) {
+       if (one_body) deriv[i] -= densityPrime[i]/density;
      }
      // Virial of positions
-     // Construct virial integrand
-     vector<Tensor> integrandVirial(nhist);
-     for(unsigned i=0;i<nhist;++i){
-       if (gofr[i]>1.e-10) {
-         integrandVirial[i] = gofrVirial[i]*logGofr[i]*vectorX2[i];
+     if (!no_two_body) {
+       // Construct virial integrand
+       vector<Tensor> integrandVirial(nhist);
+       for(unsigned i=0;i<nhist;++i){
+         if (gofr[i]>1.e-10) {
+           integrandVirial[i] = gofrVirial[i]*logGofr[i]*vectorX2[i];
+         }
        }
+       // Integrate virial
+       virial = -TwoPiDensity*integrate(integrandVirial,deltar);
+       if (local_density) virial += pair_entropy*densityVirial/density;
      }
-     // Integrate virial
-     virial = -TwoPiDensity*integrate(integrandVirial,deltar);
-     if (local_density) virial += pair_entropy*densityVirial/density;
-     if (one_body) virial += densityVirial/density;
+     if (one_body) virial -= densityVirial/density;
      // Virial of volume
      if (!local_density) {
        // Construct virial integrand
