@@ -99,6 +99,8 @@ private:
   // Cut at first peak
   bool doCutAtFirstPeak;
   double cutAtFirstPeakValue;
+  // Switching function
+  SwitchingFunction switchingFunction;
 public:
   static void registerKeywords( Keywords& keys );
   explicit PairEntropies(const ActionOptions&);
@@ -135,6 +137,9 @@ void PairEntropies::registerKeywords( Keywords& keys ){
   keys.use("MIN"); keys.use("BETWEEN"); keys.use("HISTOGRAM"); keys.use("MOMENTS");
   keys.use("ALT_MIN"); keys.use("LOWEST"); keys.use("HIGHEST"); 
   keys.add("optional","INTEGRAND_FILE","the file on which to write the integrand");
+  keys.add("optional","SWITCH","This keyword is used if you employ the LOCAL_DENSITY option. "
+           "The following provides information on the \\ref switchingfunction that are available. "
+           "When this keyword is present you no longer need the NN, MM, D_0 and R_0 keywords.");
 }
 
 PairEntropies::PairEntropies(const ActionOptions&ao):
@@ -211,6 +216,18 @@ MultiColvarBase(ao)
     else log.printf("   The first peak is determined as the position where g(r) is equal to %f \n", cutAtFirstPeakValue);
   }
 
+  // Read in the switching function for the local density
+  std::string sw, errors; parse("SWITCH",sw);
+  if(sw.length()>0) {
+    switchingFunction.set(sw,errors);
+    if( errors.length()!=0 ) error("problem reading SWITCH keyword : " + errors );
+    if (!local_density) error("Switching function given but LOCAL_DENSITY keyword not used");
+  } else {
+    if (local_density) error("LOCAL_DENSITY keyword used but no switching function given");
+  }
+  if (local_density) log.printf("  the local density will be computed with cutoff %s\n",( switchingFunction.description() ).c_str() );
+
+
   checkRead();
   // Define heavily used constants
   double sqrt2piSigma = std::sqrt(2*pi)*sigma;
@@ -228,7 +245,11 @@ MultiColvarBase(ao)
   }
 
   // Set the link cell cutoff
-  setLinkCellCutoff( maxr + 3*sigma );
+  if (local_density && (switchingFunction.get_dmax() > (maxr + 3*sigma)) ) {
+    setLinkCellCutoff( switchingFunction.get_dmax() );
+  } else {
+    setLinkCellCutoff( maxr + 3*sigma );
+  }
   rcut2 = (maxr + 3*sigma)*(maxr + 3*sigma);
   rcut = std::sqrt(rcut2);
   log.printf("Setting cut off to %f \n ", maxr + 3*sigma );
@@ -249,9 +270,12 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
    Matrix<Vector> gofrPrime(nhist,getNumberOfAtoms());
    vector<Vector> deriv(getNumberOfAtoms());
    vector<Tensor> gofrVirial(nhist);
+   vector<Vector> densityPrime(getNumberOfAtoms());
+   Tensor densityVirial;
    Tensor virial;
+   double r0 = switchingFunction.get_r0();
    // Construct g(r)
-   int countNeigh=0;
+   double countNeigh=0;
    for(unsigned i=1;i<myatoms.getNumberOfAtoms();++i){
       Vector& distance=myatoms.getPosition(i);  
       if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
@@ -275,14 +299,19 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
                gofrVirial[j] += vv;
              }
 	   } 
-           countNeigh += 1;
+           if (local_density) {
+             double dsw;
+             countNeigh += switchingFunction.calculateSqr( d2 , dsw );
+             densityPrime[i] = (dsw / ( (4./3.)*pi*r0*r0*r0) )*distance;
+             densityVirial += Tensor(densityPrime[i], distance);
+           }
       }
    }
    // Normalize g(r)
    double volume=getBox().determinant(); 
    double density;
    if (density_given>0) density=density_given;
-   else if (local_density) density= (double) countNeigh / ( (4./3.)*pi*rcut*rcut*rcut);
+   else if (local_density) density= (double) countNeigh / ( (4./3.)*pi*r0*r0*r0);
    else density=getNumberOfAtoms()/volume;
    //log.printf("rcut %f \n", rcut);
    //log.printf("countNeigh %d \n", countNeigh);
@@ -297,6 +326,7 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
        gofrVirial[i] /= normConstant;
        for(unsigned j=0;j<myatoms.getNumberOfAtoms();++j){
          gofrPrime[i][j] /= normConstant;
+         if (local_density) gofrPrime[i][j] -= densityPrime[j]*gofr[i]/density;
        }
      }
    }
@@ -352,13 +382,7 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
      }
    }
    // Integrate to obtain pair entropy;
-   double entropy=0.;
-   if (!no_two_body) {
-      entropy += -TwoPiDensity*integrate(integrand,deltar); 
-   }
-   if (one_body) {
-      entropy += 5./2. - std::log(density*deBroglie3);
-   }
+   double pair_entropy = -TwoPiDensity*integrate(integrand,deltar); 
    if (!doNotCalculateDerivatives()) {
      // Construct integrand and integrate derivatives
      for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i) {
@@ -370,6 +394,8 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
        }
        // Integrate
        deriv[i] = -TwoPiDensity*integrate(integrandDerivatives,deltar);
+       if (local_density) deriv[i] += pair_entropy*densityPrime[i]/density;
+       if (one_body) deriv[i] += densityPrime[i]/density;
      }
      // Virial of positions
      // Construct virial integrand
@@ -381,19 +407,31 @@ double PairEntropies::compute( const unsigned& tindex, AtomValuePack& myatoms ) 
      }
      // Integrate virial
      virial = -TwoPiDensity*integrate(integrandVirial,deltar);
+     if (local_density) virial += pair_entropy*densityVirial/density;
+     if (one_body) virial += densityVirial/density;
      // Virial of volume
-     // Construct virial integrand
-     vector<double> integrandVirialVolume(nhist);
-     for(unsigned i=0;i<nhist;i+=1) {   
-       integrandVirialVolume[i] = (-gofr[i]+1)*vectorX2[i];
+     if (!local_density) {
+       // Construct virial integrand
+       vector<double> integrandVirialVolume(nhist);
+       for(unsigned i=0;i<nhist;i+=1) {   
+         integrandVirialVolume[i] = (-gofr[i]+1)*vectorX2[i];
+       }
+       // Integrate virial
+       virial += -TwoPiDensity*integrate(integrandVirialVolume,deltar)*Tensor::identity();
      }
-     // Integrate virial
-     virial += -TwoPiDensity*integrate(integrandVirialVolume,deltar)*Tensor::identity();
    }
    // Assign derivatives
    for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i) addAtomDerivatives( 1, i, deriv[i], myatoms );
    // Assign virial
    myatoms.addBoxDerivatives( 1, virial );
+
+   double entropy=0.;
+   if (!no_two_body) {
+      entropy += pair_entropy;
+   }
+   if (one_body) {
+      entropy += 5./2. - std::log(density*deBroglie3);
+   }
    return entropy;
 }
 
