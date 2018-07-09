@@ -36,6 +36,7 @@ namespace colvar{
 
 class PairOrientationalEntropyConformer : public Colvar {
   bool pbc, serial, invalidateList, firsttime, doneigh;
+  bool do_pairs;
   NeighborListParallel *nl;
   vector<AtomNumber> center_lista,start_lista,end_lista;
   vector<AtomNumber> vector1start_lista,vector1end_lista;
@@ -43,8 +44,8 @@ class PairOrientationalEntropyConformer : public Colvar {
   vector<AtomNumber> vector3start_lista,vector3end_lista;
   std::vector<PLMD::AtomNumber> atomsToRequest;
   double maxr;
-  vector<int> nhist_;
-  int nhist1_nhist2_;
+  vector<unsigned> nhist_;
+  unsigned nhist1_nhist2_;
   vector<double> sigma_;
   double rcut2;
   double invTwoPiSigma1Sigma2, sigma1Sqr, sigma2Sqr, twoSigma1Sqr,twoSigma2Sqr;
@@ -99,6 +100,7 @@ void PairOrientationalEntropyConformer::registerKeywords( Keywords& keys ){
   keys.addFlag("NLIST",false,"Use a neighbour list to speed up the calculation");
   keys.addFlag("OUTPUT_GOFR",false,"Output g(r)");
   keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
+  keys.addFlag("INDIVIDUAL_PAIRS",false,"Obtain pair entropy of AA, AB, and BB pairs");
   keys.add("optional","AVERAGE_GOFR_TAU","Characteristic length of a window in which to average the g(r). It is in units of iterations and should be an integer. Zero corresponds to an normal average (infinite window).");
   keys.addFlag("UP_DOWN_SYMMETRY",false,"The symmetry is such that parallel and antiparallel vectors are not distinguished. The angle goes from 0 to pi/2 instead of from 0 to pi.");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
@@ -123,12 +125,17 @@ void PairOrientationalEntropyConformer::registerKeywords( Keywords& keys ){
   keys.add("optional","TEMPERATURE","Temperature in Kelvin. It is compulsory when keyword ONE_BODY is used");
   keys.add("optional","MASS","Mass in g/mol. It is compulsory when keyword ONE_BODY is used");
   keys.addFlag("ONE_BODY",false,"Add the one body term (S = 5/2 - ln(dens*deBroglie^3) ) to the entropy");
+  keys.addOutputComponent("pairAA","INDIVIDUAL_PAIRS","Pair AA contribution to the multicomponent pair entropy");
+  keys.addOutputComponent("pairAB","INDIVIDUAL_PAIRS","Pair AB contribution to the multicomponent pair entropy");
+  keys.addOutputComponent("pairBB","INDIVIDUAL_PAIRS","Pair BB contribution to the multicomponent pair entropy");
+  keys.addOutputComponent("full","INDIVIDUAL_PAIRS","Total multicomponent pair entropy");
 }
 
 PairOrientationalEntropyConformer::PairOrientationalEntropyConformer(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 pbc(true),
 serial(false),
+do_pairs(false),
 invalidateList(true),
 firsttime(true)
 {
@@ -168,15 +175,13 @@ firsttime(true)
   if(pbc) log.printf("  using periodic boundary conditions\n");
   else    log.printf("  without periodic boundary conditions\n");
 
-  addValueWithDerivatives(); setNotPeriodic();
-
   parse("MAXR",maxr);
   log.printf("  Integration in the interval from 0. to %f \n", maxr );
 
   parseVector("SIGMA",sigma_);
   if(sigma_.size() != 2) error("SIGMA keyword takes two input values");
   log.printf("  The pair distribution function is calculated with a Gaussian kernel with deviations %f and %f \n", sigma_[0], sigma_[1]);
-  double rcut = maxr + 2*sigma_[0];  // 2*sigma is hard coded
+  double rcut = maxr + 2*sigma_[0];  // 3*sigma is hard coded
   rcut2 = rcut*rcut;
   if(doneigh){
     if(nl_cut<rcut) error("NL_CUTOFF should be larger than MAXR + 2*SIGMA");
@@ -250,6 +255,9 @@ firsttime(true)
   if (averageGofrTau!=0 && !doAverageGofr) error("AVERAGE_GOFR_TAU specified but AVERAGE_GOFR not given. Specify AVERAGE_GOFR or remove AVERAGE_GOFR_TAU");
   if (doAverageGofr && averageGofrTau==0) log.printf("The g(r) will be averaged over all frames \n");
   if (doAverageGofr && averageGofrTau!=0) log.printf("The g(r) will be averaged with a window of %d steps \n", averageGofrTau);
+
+  parseFlag("INDIVIDUAL_PAIRS",do_pairs);
+  if (do_pairs) log.printf("  The AA, AB, and BB contributions will be computed separately \n");
 
   doOutputXYZ=false;
   parseFlag("OUTPUT_XYZ",doOutputXYZ);
@@ -331,6 +339,17 @@ firsttime(true)
      x2[i]=startCosAngle+deltaCosAngle*i;
      x2sqr[i]=x2[i]*x2[i];
   }
+
+
+  // Define output components
+  if (do_pairs) {
+    addComponentWithDerivatives("pairAA"); componentIsNotPeriodic("pairAA");
+    addComponentWithDerivatives("pairAB"); componentIsNotPeriodic("pairAB");
+    addComponentWithDerivatives("pairBB"); componentIsNotPeriodic("pairBB");
+    addComponentWithDerivatives("full"); componentIsNotPeriodic("full");
+  } else {
+    addValueWithDerivatives(); setNotPeriodic();
+  }
 }
 
 PairOrientationalEntropyConformer::~PairOrientationalEntropyConformer(){
@@ -364,7 +383,7 @@ void PairOrientationalEntropyConformer::calculate()
   std::vector<Vector> deriv_spin(6*number_molecules);
   std::vector<double> spin(number_molecules);
   double number_A_molecules = 0.;
-  //std::vector<Vector> vectors1(number_molecules), vectors2(number_molecules), vectors3(number_molecules);
+  std::vector<Vector> vectors1(number_molecules), vectors2(number_molecules), vectors3(number_molecules);
   for(int i=0;i<number_molecules;i+=1) {
     /*
     log.printf("atom1 x y z %f %f %f \n", getPosition(i)[0]*10., getPosition(i)[1]*10., getPosition(i)[2]*10.);
@@ -373,11 +392,9 @@ void PairOrientationalEntropyConformer::calculate()
     Vector vector1=pbcDistance(getPosition(i+3*number_molecules),getPosition(i+4*number_molecules));
     Vector vector2=pbcDistance(getPosition(i+5*number_molecules),getPosition(i+6*number_molecules));
     Vector vector3=pbcDistance(getPosition(i+7*number_molecules),getPosition(i+8*number_molecules));
-    /*
     vectors1[i] = vector1;
     vectors2[i] = vector2;
     vectors3[i] = vector3;
-    */
     double norm_v1 = std::sqrt(vector1[0]*vector1[0]+vector1[1]*vector1[1]+vector1[2]*vector1[2]);
     double norm_v2 = std::sqrt(vector2[0]*vector2[0]+vector2[1]*vector2[1]+vector2[2]*vector2[2]);
     double norm_v3 = std::sqrt(vector3[0]*vector3[0]+vector3[1]*vector3[1]+vector3[2]*vector3[2]);
@@ -457,9 +474,9 @@ void PairOrientationalEntropyConformer::calculate()
   vector<Vector> gofrPrimeVector1StartAB(nhist_[0]*nhist_[1]*center_lista.size());
   vector<Vector> gofrPrimeVector2StartAB(nhist_[0]*nhist_[1]*center_lista.size());
   vector<Vector> gofrPrimeVector3StartAB(nhist_[0]*nhist_[1]*center_lista.size());
-  //Matrix<Tensor> gofrVirialAA(nhist_[0],nhist_[1]);
-  //Matrix<Tensor> gofrVirialBB(nhist_[0],nhist_[1]);
-  //Matrix<Tensor> gofrVirialAB(nhist_[0],nhist_[1]);
+  Matrix<Tensor> gofrVirialAA(nhist_[0],nhist_[1]);
+  Matrix<Tensor> gofrVirialBB(nhist_[0],nhist_[1]);
+  Matrix<Tensor> gofrVirialAB(nhist_[0],nhist_[1]);
   // Calculate volume and density
   double number_B_molecules = number_molecules-number_A_molecules;
   double volume=getBox().determinant();
@@ -568,33 +585,39 @@ void PairOrientationalEntropyConformer::calculate()
                   } else {
                      h=l;
                   }
-                  vector<double> dfunc(2);
+                  vector<double> dfuncAA(2);
+                  vector<double> dfuncBB(2);
+                  vector<double> dfuncAB(2);
                   double kernelAA, kernelBB, kernelAB;
                   if (l==(nhist_[1]-1) || l==0) {
-                     kernelAA = kernel(pos,2.*invNormKernelAA,dfunc);
-                     kernelBB = kernel(pos,2.*invNormKernelBB,dfunc);
-                     kernelAB = kernel(pos,2.*invNormKernelAB,dfunc);
+                     kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
+                     kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
+                     kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
                   } else {
-                     kernelAA = kernel(pos,invNormKernelAA,dfunc);
-                     kernelBB = kernel(pos,invNormKernelBB,dfunc);
-                     kernelAB = kernel(pos,invNormKernelAB,dfunc);
+                     kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
+                     kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
+                     kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
                   }
                   // These are divided by 2 because they will be summed twice
                   gofrAA[k][h] += kernelAA*spin[index]*spin[neighbor]/2.;
                   gofrBB[k][h] += kernelBB*(1-spin[index])*(1-spin[neighbor])/2.;
                   gofrAB[k][h] += kernelAB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor])/2.;
 
-                  Vector value1 = dfunc[0]*distance_versor;
-                  Vector value2_mol1 = dfunc[1]*der_mol1;
-                  gofrPrimeCenterAA[index*nhist1_nhist2_+k*nhist_[1]+h] += value1*spin[index]*spin[neighbor];
-                  gofrPrimeCenterBB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeCenterAB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
-                  gofrPrimeStartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*spin[index]*spin[neighbor];
-                  gofrPrimeStartBB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeStartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
-                  gofrPrimeEndAA[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*spin[index]*spin[neighbor];
-                  gofrPrimeEndBB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeEndAB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+                  Vector value1AA = dfuncAA[0]*distance_versor;
+                  Vector value1BB = dfuncBB[0]*distance_versor;
+                  Vector value1AB = dfuncAB[0]*distance_versor;
+                  Vector value2_mol1AA = dfuncAA[1]*der_mol1;
+                  Vector value2_mol1BB = dfuncBB[1]*der_mol1;
+                  Vector value2_mol1AB = dfuncAB[1]*der_mol1;
+                  gofrPrimeCenterAA[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[index]*spin[neighbor];
+                  gofrPrimeCenterBB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[index])*(1-spin[neighbor]);
+                  gofrPrimeCenterAB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+                  gofrPrimeStartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[index]*spin[neighbor];
+                  gofrPrimeStartBB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
+                  gofrPrimeStartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+                  gofrPrimeEndAA[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[index]*spin[neighbor];
+                  gofrPrimeEndBB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
+                  gofrPrimeEndAB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
 
                   gofrPrimeVector1StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index];
                   gofrPrimeVector2StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules];
@@ -606,9 +629,12 @@ void PairOrientationalEntropyConformer::calculate()
                   gofrPrimeVector2StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules];
                   gofrPrimeVector3StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules];
 
-                  /*
-                  Tensor vv1(value1, distance);
-                  Tensor vv2_mol1(value2_mol1, mol_vector1);
+                  Tensor vv1AA(value1AA, distance);
+                  Tensor vv1BB(value1BB, distance);
+                  Tensor vv1AB(value1AB, distance);
+                  Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
+                  Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
+                  Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
                   Tensor vv3_vector1_AA(kernelAA*spin[neighbor]*deriv_spin[index],vectors1[index]);
                   Tensor vv3_vector2_AA(kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules],vectors2[index]);
                   Tensor vv3_vector3_AA(kernelAA*spin[neighbor]*deriv_spin[index+4*number_molecules],vectors3[index]);
@@ -619,10 +645,9 @@ void PairOrientationalEntropyConformer::calculate()
                   Tensor vv3_vector2_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules],vectors2[index]);
                   Tensor vv3_vector3_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules],vectors3[index]);
 
-                  gofrVirialAA[k][h] += (vv1/2.+vv2_mol1)*spin[index]*spin[neighbor] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
-                  gofrVirialBB[k][h] += (vv1/2.+vv2_mol1)*(1-spin[index])*(1-spin[neighbor]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
-                  gofrVirialAB[k][h] += (vv1/2.+vv2_mol1)*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
-                  */
+                  gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[index]*spin[neighbor] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
+                  gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[index])*(1-spin[neighbor]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
+                  gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
                }
              }
            }
@@ -684,67 +709,85 @@ void PairOrientationalEntropyConformer::calculate()
             vector<double> pos(2);
             pos[0]=x1[k]-distanceModulo;
             for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-               double theta=startCosAngle+deltaCosAngle*l;
-               if (doUpDownSymmetry && cosAngle<0) {
-                  pos[1]=theta+cosAngle;
-               } else {
-                  pos[1]=theta-cosAngle;
-               }
-               // Include periodic effects
-               int h;
-               if (l<0) {
-                  h=-l;
-               } else if (l>(nhist_[1]-1)) {
-                  h=2*nhist_[1]-l-2;
-               } else {
-                  h=l;
-               }
-               vector<double> dfunc(2);
-               double kernelAA, kernelBB, kernelAB;
-               if (l==(nhist_[1]-1) || l==0) {
-                  kernelAA = kernel(pos,2.*invNormKernelAA,dfunc);
-                  kernelBB = kernel(pos,2.*invNormKernelBB,dfunc);
-                  kernelAB = kernel(pos,2.*invNormKernelAB,dfunc);
-               } else {
-                  kernelAA = kernel(pos,invNormKernelAA,dfunc);
-                  kernelBB = kernel(pos,invNormKernelBB,dfunc);
-                  kernelAB = kernel(pos,invNormKernelAB,dfunc);
-               }
+              double theta=startCosAngle+deltaCosAngle*l;
+              if (doUpDownSymmetry && cosAngle<0) {
+                 pos[1]=theta+cosAngle;
+              } else {
+                 pos[1]=theta-cosAngle;
+              }
+              // Include periodic effects
+              int h;
+              if (l<0) {
+                 h=-l;
+              } else if (l>(nhist_[1]-1)) {
+                 h=2*nhist_[1]-l-2;
+              } else {
+                 h=l;
+              }
+              vector<double> dfuncAA(2);
+              vector<double> dfuncBB(2);
+              vector<double> dfuncAB(2);
+              double kernelAA, kernelBB, kernelAB;
+              if (l==(nhist_[1]-1) || l==0) {
+                 kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
+                 kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
+                 kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
+              } else {
+                 kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
+                 kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
+                 kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
+              }
 
-               gofrAA[k][h] += kernelAA*spin[i]*spin[j]/2.;
-               gofrBB[k][h] += kernelBB*(1-spin[i])*(1-spin[j])/2.;
-               gofrAB[k][h] += kernelAB*(spin[i]+spin[j]-2*spin[i]*spin[j])/2.;
+              gofrAA[k][h] += kernelAA*spin[i]*spin[j]/2.;
+              gofrBB[k][h] += kernelBB*(1-spin[i])*(1-spin[j])/2.;
+              gofrAB[k][h] += kernelAB*(spin[i]+spin[j]-2*spin[i]*spin[j])/2.;
 
-               Vector value1 = dfunc[0]*distance_versor;
-               Vector value2_mol1 = dfunc[1]*der_mol1;
-               gofrPrimeCenterAA[i*nhist1_nhist2_+k*nhist_[1]+h] += value1*spin[i]*spin[j];
-               gofrPrimeCenterBB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1*(1-spin[i])*(1-spin[j]);
-               gofrPrimeCenterAB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-               gofrPrimeStartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*spin[i]*spin[j];
-               gofrPrimeStartBB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*(1-spin[i])*(1-spin[j]);
-               gofrPrimeStartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-               gofrPrimeEndAA[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*spin[i]*spin[j];
-               gofrPrimeEndBB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*(1-spin[i])*(1-spin[j]);
-               gofrPrimeEndAB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+              Vector value1AA = dfuncAA[0]*distance_versor;
+              Vector value1BB = dfuncBB[0]*distance_versor;
+              Vector value1AB = dfuncAB[0]*distance_versor;
+              Vector value2_mol1AA = dfuncAA[1]*der_mol1;
+              Vector value2_mol1BB = dfuncBB[1]*der_mol1;
+              Vector value2_mol1AB = dfuncAB[1]*der_mol1;
+              gofrPrimeCenterAA[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[i]*spin[j];
+              gofrPrimeCenterBB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[i])*(1-spin[j]);
+              gofrPrimeCenterAB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+              gofrPrimeStartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[i]*spin[j];
+              gofrPrimeStartBB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
+              gofrPrimeStartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+              gofrPrimeEndAA[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[i]*spin[j];
+              gofrPrimeEndBB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
+              gofrPrimeEndAB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
 
-               /*
-               Tensor vv1(value1, distance);
-               Tensor vv2_mol1(value2_mol1, mol_vector1);
+              gofrPrimeVector1StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i];
+              gofrPrimeVector2StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+2*number_molecules];
+              gofrPrimeVector3StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+4*number_molecules];
+              gofrPrimeVector1StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i];
+              gofrPrimeVector2StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules];
+              gofrPrimeVector3StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules];
+              gofrPrimeVector1StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i];
+              gofrPrimeVector2StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules];
+              gofrPrimeVector3StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules];
 
-               gofrVirialAA[k][h] += (vv1/2.+vv2_mol1)*spin[i]*spin[j];
-               gofrVirialBB[k][h] += (vv1/2.+vv2_mol1)*(1-spin[i])*(1-spin[j]);
-               gofrVirialAB[k][h] += (vv1/2.+vv2_mol1)*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-               */
- 
-               gofrPrimeVector1StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i];
-               gofrPrimeVector2StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+2*number_molecules];
-               gofrPrimeVector3StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+4*number_molecules];
-               gofrPrimeVector1StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i];
-               gofrPrimeVector2StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules];
-               gofrPrimeVector3StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules];
-               gofrPrimeVector1StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i];
-               gofrPrimeVector2StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules];
-               gofrPrimeVector3StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules];
+
+              Tensor vv1AA(value1AA, distance);
+              Tensor vv1BB(value1BB, distance);
+              Tensor vv1AB(value1AB, distance);
+              Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
+              Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
+              Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
+              Tensor vv3_vector1_AA(kernelAA*spin[j]*deriv_spin[i],vectors1[i]);
+              Tensor vv3_vector2_AA(kernelAA*spin[j]*deriv_spin[i+2*number_molecules],vectors2[i]);
+              Tensor vv3_vector3_AA(kernelAA*spin[j]*deriv_spin[i+4*number_molecules],vectors3[i]);
+              Tensor vv3_vector1_BB(-kernelBB*(1-spin[j])*deriv_spin[i],vectors1[i]);
+              Tensor vv3_vector2_BB(-kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
+              Tensor vv3_vector3_BB(-kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
+              Tensor vv3_vector1_AB(kernelAB*(1-2*spin[j])*deriv_spin[i],vectors1[i]);
+              Tensor vv3_vector2_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
+              Tensor vv3_vector3_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
+
+              gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[i]*spin[j] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
+              gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[i])*(1-spin[j]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
+              gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[i]+spin[j]-2*spin[i]*spin[j]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
             }
           }
         }
@@ -757,11 +800,11 @@ void PairOrientationalEntropyConformer::calculate()
     comm.Sum(gofrAA);
     comm.Sum(gofrBB);
     comm.Sum(gofrAB);
-    /*
     if (!doNotCalculateDerivatives() ) {
        comm.Sum(gofrVirialAA);
        comm.Sum(gofrVirialBB);
        comm.Sum(gofrVirialAB);
+       /*
        comm.Sum(gofrPrimeCenterAA);
        comm.Sum(gofrPrimeCenterBB);
        comm.Sum(gofrPrimeCenterAB);
@@ -771,8 +814,8 @@ void PairOrientationalEntropyConformer::calculate()
        comm.Sum(gofrPrimeEndAA);
        comm.Sum(gofrPrimeEndBB);
        comm.Sum(gofrPrimeEndAB);
+       */
     }
-    */
   }
   //std::cout << "Communication: " <<  float( clock () - begin_time ) << "\n";
   //begin_time = clock();
@@ -831,19 +874,24 @@ void PairOrientationalEntropyConformer::calculate()
   double prefactorAA=(2*pi/volumeOfAngles)*densityA*densityA/density;
   double prefactorBB=(2*pi/volumeOfAngles)*densityB*densityB/density;
   double prefactorAB=(4*pi/volumeOfAngles)*densityA*densityB/density;
-  double pairEntropy=-prefactorAA*integrate(integrandAA,delta)
-                     -prefactorBB*integrate(integrandBB,delta)
-                     -prefactorAB*integrate(integrandAB,delta);
+  double pairAAvalue=-prefactorAA*integrate(integrandAA,delta);
+  double pairBBvalue=-prefactorBB*integrate(integrandBB,delta);
+  double pairABvalue=-prefactorAB*integrate(integrandAB,delta);
+  double oneBody = 0.;
   if (one_body) {
-    pairEntropy += (8./2. - std::log(densityA*deBroglie3))*number_A_molecules/number_molecules;
-    pairEntropy += (8./2. - std::log(densityB*deBroglie3))*number_B_molecules/number_molecules;
+    oneBody += (8./2. - std::log(densityA*deBroglie3))*number_A_molecules/number_molecules;
+    oneBody += (8./2. - std::log(densityB*deBroglie3))*number_B_molecules/number_molecules;
   }
   //std::cout << "Integrand and integration: " << float( clock () - begin_time ) << "\n";
   //begin_time = clock();
   // Derivatives
-  vector<Vector> deriv(getNumberOfAtoms());
-  Tensor virial;
+  vector<Vector> derivAA(getNumberOfAtoms());
+  vector<Vector> derivBB(getNumberOfAtoms());
+  vector<Vector> derivAB(getNumberOfAtoms());
+  vector<Vector> derivOneBody(getNumberOfAtoms());
+  Tensor virialAA, virialBB, virialAB, virialOneBody;
   if (!doNotCalculateDerivatives() ) {
+    Tensor gofrPrefactorVirial;
     if (doneigh) {
        for(unsigned int k=0;k<nl->getNumberOfLocalAtoms();k+=1) {
          unsigned index=nl->getIndexOfLocalAtom(k);
@@ -874,6 +922,7 @@ void PairOrientationalEntropyConformer::calculate()
          Matrix<Vector> integrandDerivativesVector1StartAB(nhist_[0],nhist_[1]);
          Matrix<Vector> integrandDerivativesVector2StartAB(nhist_[0],nhist_[1]);
          Matrix<Vector> integrandDerivativesVector3StartAB(nhist_[0],nhist_[1]);
+         gofrPrefactorVirial += Tensor(deriv_spin[index],vectors1[index])+Tensor(deriv_spin[index+2*number_molecules],vectors2[index])+Tensor(deriv_spin[index+4*number_molecules],vectors3[index]);
          for(unsigned i=0;i<nhist_[0];++i){
            for(unsigned j=0;j<nhist_[1];++j){
              if (gofrAA[i][j]>1.e-10) {
@@ -911,49 +960,60 @@ void PairOrientationalEntropyConformer::calculate()
              }
            }
          }
-         deriv[index] = -prefactorAA*integrate(integrandDerivativesAA,delta)
-                        -prefactorBB*integrate(integrandDerivativesBB,delta)
-                        -prefactorAB*integrate(integrandDerivativesAB,delta);
-         deriv[start_atom] = -prefactorAA*integrate(integrandDerivativesStartAA,delta)
-                             -prefactorBB*integrate(integrandDerivativesStartBB,delta)
-                             -prefactorAB*integrate(integrandDerivativesStartAB,delta);
-         deriv[end_atom] = -prefactorAA*integrate(integrandDerivativesEndAA,delta)
-                           -prefactorBB*integrate(integrandDerivativesEndBB,delta)
-                           -prefactorAB*integrate(integrandDerivativesEndAB,delta);
-         deriv[vector1_start_atom] = -prefactorAA*integrate(integrandDerivativesVector1StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[index]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector1StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector1StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index]*integrate(integrandAB,delta);
+         derivAA[index] = -prefactorAA*integrate(integrandDerivativesAA,delta);
+         derivBB[index] = -prefactorBB*integrate(integrandDerivativesBB,delta);
+         derivAB[index] = -prefactorAB*integrate(integrandDerivativesAB,delta);
+         derivAA[start_atom] = -prefactorAA*integrate(integrandDerivativesStartAA,delta);
+         derivBB[start_atom] = -prefactorBB*integrate(integrandDerivativesStartBB,delta);
+         derivAB[start_atom] = -prefactorAB*integrate(integrandDerivativesStartAB,delta);
+         derivAA[end_atom] = -prefactorAA*integrate(integrandDerivativesEndAA,delta);
+         derivBB[end_atom] = -prefactorBB*integrate(integrandDerivativesEndBB,delta);
+         derivAB[end_atom] = -prefactorAB*integrate(integrandDerivativesEndAB,delta);
+         derivAA[vector1_start_atom] = -prefactorAA*integrate(integrandDerivativesVector1StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[index]*integrate(integrandAA,delta);
+         derivBB[vector1_start_atom] = -prefactorBB*integrate(integrandDerivativesVector1StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index])*integrate(integrandBB,delta);
+         derivAB[vector1_start_atom] = -prefactorAB*integrate(integrandDerivativesVector1StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector1_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index]/number_molecules
-                                       +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index])/number_molecules;
+           derivOneBody[vector1_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index]/number_molecules
+                                            +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index])/number_molecules;
          }
-         deriv[vector1_end_atom] = -deriv[vector1_start_atom];
-         deriv[vector2_start_atom] = -prefactorAA*integrate(integrandDerivativesVector2StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[index+2*number_molecules]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector2StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index+2*number_molecules])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector2StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+2*number_molecules]*integrate(integrandAB,delta);
+         derivAA[vector1_end_atom] = -derivAA[vector1_start_atom];
+         derivBB[vector1_end_atom] = -derivBB[vector1_start_atom];
+         derivAB[vector1_end_atom] = -derivAB[vector1_start_atom];
+         derivOneBody[vector1_end_atom] = -derivOneBody[vector1_start_atom];
+         derivAA[vector2_start_atom] = -prefactorAA*integrate(integrandDerivativesVector2StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[index+2*number_molecules]*integrate(integrandAA,delta);
+         derivBB[vector2_start_atom] = -prefactorBB*integrate(integrandDerivativesVector2StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index+2*number_molecules])*integrate(integrandBB,delta);
+         derivAB[vector2_start_atom] = -prefactorAB*integrate(integrandDerivativesVector2StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+2*number_molecules]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector2_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index+2*number_molecules]/number_molecules
-                                       +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index+2*number_molecules])/number_molecules;
+           derivOneBody[vector2_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index+2*number_molecules]/number_molecules
+                                            +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index+2*number_molecules])/number_molecules;
          }
-         deriv[vector2_end_atom] = -deriv[vector2_start_atom];
-         deriv[vector3_start_atom] = -prefactorAA*integrate(integrandDerivativesVector3StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[index+4*number_molecules]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector3StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index+4*number_molecules])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector3StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+4*number_molecules]*integrate(integrandAB,delta);
+         derivAA[vector2_end_atom] = -derivAA[vector2_start_atom];
+         derivBB[vector2_end_atom] = -derivBB[vector2_start_atom];
+         derivAB[vector2_end_atom] = -derivAB[vector2_start_atom];
+         derivOneBody[vector2_end_atom] = -derivOneBody[vector2_start_atom];
+         derivAA[vector3_start_atom] = -prefactorAA*integrate(integrandDerivativesVector3StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[index+4*number_molecules]*integrate(integrandAA,delta);
+         derivBB[vector3_start_atom] = -prefactorBB*integrate(integrandDerivativesVector3StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[index+4*number_molecules])*integrate(integrandBB,delta);
+         derivAB[vector3_start_atom] = -prefactorAB*integrate(integrandDerivativesVector3StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+4*number_molecules]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector3_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index+4*number_molecules]/number_molecules
-                                       +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index+4*number_molecules])/number_molecules;
+           derivOneBody[vector3_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[index+4*number_molecules]/number_molecules
+                                            +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[index+4*number_molecules])/number_molecules;
          }
-         deriv[vector3_end_atom] = -deriv[vector3_start_atom];
+         derivAA[vector3_end_atom] = -derivAA[vector3_start_atom];
+         derivBB[vector3_end_atom] = -derivBB[vector3_start_atom];
+         derivAB[vector3_end_atom] = -derivAB[vector3_start_atom];
+         derivOneBody[vector3_end_atom] = -derivOneBody[vector3_start_atom];
+
          /*
+         virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+0*number_molecules]*integrate(integrandAA,delta),vectors1[index]);
          virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+0*number_molecules]*integrate(integrandAA,delta),vectors1[index]);
          virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+2*number_molecules]*integrate(integrandAA,delta),vectors2[index]);
          virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+4*number_molecules]*integrate(integrandAA,delta),vectors3[index]);
@@ -994,6 +1054,7 @@ void PairOrientationalEntropyConformer::calculate()
          Matrix<Vector> integrandDerivativesVector1StartAB(nhist_[0],nhist_[1]);
          Matrix<Vector> integrandDerivativesVector2StartAB(nhist_[0],nhist_[1]);
          Matrix<Vector> integrandDerivativesVector3StartAB(nhist_[0],nhist_[1]);
+         gofrPrefactorVirial += Tensor(deriv_spin[k],vectors1[k])+Tensor(deriv_spin[k+2*number_molecules],vectors2[k])+Tensor(deriv_spin[k+4*number_molecules],vectors3[k]);
          for(unsigned i=0;i<nhist_[0];++i){
            for(unsigned j=0;j<nhist_[1];++j){
              if (gofrAA[i][j]>1.e-10) {
@@ -1031,76 +1092,90 @@ void PairOrientationalEntropyConformer::calculate()
              }
            }
          }
-         deriv[k] = -prefactorAA*integrate(integrandDerivativesAA,delta)
-                    -prefactorBB*integrate(integrandDerivativesBB,delta)
-                    -prefactorAB*integrate(integrandDerivativesAB,delta);
-         deriv[start_atom] = -prefactorAA*integrate(integrandDerivativesStartAA,delta)
-                             -prefactorBB*integrate(integrandDerivativesStartBB,delta)
-                             -prefactorAB*integrate(integrandDerivativesStartAB,delta);
-         deriv[end_atom] = -prefactorAA*integrate(integrandDerivativesEndAA,delta)
-                           -prefactorBB*integrate(integrandDerivativesEndBB,delta)
-                           -prefactorAB*integrate(integrandDerivativesEndAB,delta);
-         deriv[vector1_start_atom] = -prefactorAA*integrate(integrandDerivativesVector1StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[k]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector1StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector1StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k]*integrate(integrandAB,delta);
+         derivAA[k] = -prefactorAA*integrate(integrandDerivativesAA,delta);
+         derivBB[k] = -prefactorBB*integrate(integrandDerivativesBB,delta);
+         derivAB[k] = -prefactorAB*integrate(integrandDerivativesAB,delta);
+         derivAA[start_atom] = -prefactorAA*integrate(integrandDerivativesStartAA,delta);
+         derivBB[start_atom] = -prefactorBB*integrate(integrandDerivativesStartBB,delta);
+         derivAB[start_atom] = -prefactorAB*integrate(integrandDerivativesStartAB,delta);
+         derivAA[end_atom] = -prefactorAA*integrate(integrandDerivativesEndAA,delta);
+         derivBB[end_atom] = -prefactorBB*integrate(integrandDerivativesEndBB,delta);
+         derivAB[end_atom] = -prefactorAB*integrate(integrandDerivativesEndAB,delta);
+         derivAA[vector1_start_atom] = -prefactorAA*integrate(integrandDerivativesVector1StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[k]*integrate(integrandAA,delta);
+         derivBB[vector1_start_atom] = -prefactorBB*integrate(integrandDerivativesVector1StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k])*integrate(integrandBB,delta);
+         derivAB[vector1_start_atom] = -prefactorAB*integrate(integrandDerivativesVector1StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector1_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k]/number_molecules
+           derivOneBody[vector1_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k]/number_molecules
                                        +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[k])/number_molecules;
          }
-         deriv[vector1_end_atom] = -deriv[vector1_start_atom];
-         deriv[vector2_start_atom] = -prefactorAA*integrate(integrandDerivativesVector2StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[k+2*number_molecules]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector2StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k+2*number_molecules])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector2StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k+2*number_molecules]*integrate(integrandAB,delta);
+         derivAA[vector1_end_atom] = -derivAA[vector1_start_atom];
+         derivBB[vector1_end_atom] = -derivBB[vector1_start_atom];
+         derivAB[vector1_end_atom] = -derivAB[vector1_start_atom];
+         derivOneBody[vector1_end_atom] = -derivOneBody[vector1_start_atom];
+         derivAA[vector2_start_atom] = -prefactorAA*integrate(integrandDerivativesVector2StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[k+2*number_molecules]*integrate(integrandAA,delta);
+         derivBB[vector2_start_atom] = -prefactorBB*integrate(integrandDerivativesVector2StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k+2*number_molecules])*integrate(integrandBB,delta);
+         derivAB[vector2_start_atom] = -prefactorAB*integrate(integrandDerivativesVector2StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k+2*number_molecules]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector2_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k+2*number_molecules]/number_molecules
+           derivOneBody[vector2_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k+2*number_molecules]/number_molecules
                                        +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[k+2*number_molecules])/number_molecules;
          }
-         deriv[vector2_end_atom] = -deriv[vector2_start_atom];
-         deriv[vector3_start_atom] = -prefactorAA*integrate(integrandDerivativesVector3StartAA,delta)
-                                     -prefactorAA*(2./number_A_molecules)*deriv_spin[k+4*number_molecules]*integrate(integrandAA,delta)
-                                     -prefactorBB*integrate(integrandDerivativesVector3StartBB,delta)
-                                     -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k+4*number_molecules])*integrate(integrandBB,delta)
-                                     -prefactorAB*integrate(integrandDerivativesVector3StartAB,delta)
-                                     -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k+4*number_molecules]*integrate(integrandAB,delta);
+         derivAA[vector2_end_atom] = -derivAA[vector2_start_atom];
+         derivBB[vector2_end_atom] = -derivBB[vector2_start_atom];
+         derivAB[vector2_end_atom] = -derivAB[vector2_start_atom];
+         derivOneBody[vector2_end_atom] = -derivOneBody[vector2_start_atom];
+         derivAA[vector3_start_atom] = -prefactorAA*integrate(integrandDerivativesVector3StartAA,delta)
+                                       -prefactorAA*(2./number_A_molecules)*deriv_spin[k+4*number_molecules]*integrate(integrandAA,delta);
+         derivBB[vector3_start_atom] = -prefactorBB*integrate(integrandDerivativesVector3StartBB,delta)
+                                       -prefactorBB*(2./number_B_molecules)*(-deriv_spin[k+4*number_molecules])*integrate(integrandBB,delta);
+         derivAB[vector3_start_atom] = -prefactorAB*integrate(integrandDerivativesVector3StartAB,delta)
+                                       -prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[k+4*number_molecules]*integrate(integrandAB,delta);
          if (one_body) {
-           deriv[vector3_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k+4*number_molecules]/number_molecules
+           derivOneBody[vector3_start_atom] += (6./2. - std::log(densityA*deBroglie3))*deriv_spin[k+4*number_molecules]/number_molecules
                                        +(6./2. - std::log(densityB*deBroglie3))*(-deriv_spin[k+4*number_molecules])/number_molecules;
          }
-         deriv[vector3_end_atom] = -deriv[vector3_start_atom];
+         derivAA[vector3_end_atom] = -derivAA[vector3_start_atom];
+         derivBB[vector3_end_atom] = -derivBB[vector3_start_atom];
+         derivAB[vector3_end_atom] = -derivAB[vector3_start_atom];
+         derivOneBody[vector3_end_atom] = -derivOneBody[vector3_start_atom];
        }
     }
     if(!serial){
-      comm.Sum(&deriv[0][0],3*getNumberOfAtoms());
+      comm.Sum(derivAA);
+      comm.Sum(derivBB);
+      comm.Sum(derivAB);
+      comm.Sum(derivOneBody);
     }
     // Virial of positions
     // Construct virial integrand
-    /*
     Matrix<Tensor> integrandVirialAA(nhist_[0],nhist_[1]);
     Matrix<Tensor> integrandVirialBB(nhist_[0],nhist_[1]);
     Matrix<Tensor> integrandVirialAB(nhist_[0],nhist_[1]);
     for(unsigned i=0;i<nhist_[0];++i){
        for(unsigned j=0;j<nhist_[1];++j){
           if (gofrAA[i][j]>1.e-10) {
-             integrandVirialAA[i][j] = gofrVirialAA[i][j]*logGofrAAx1sqr[i][j];
+             integrandVirialAA[i][j] = 
+               (gofrVirialAA[i][j]-gofrAA[i][j]*(2./number_A_molecules)*gofrPrefactorVirial)*logGofrAAx1sqr[i][j];
           }
           if (gofrBB[i][j]>1.e-10) {
-             integrandVirialBB[i][j] = gofrVirialBB[i][j]*logGofrBBx1sqr[i][j];
+             integrandVirialBB[i][j] = 
+               (gofrVirialBB[i][j]+gofrBB[i][j]*(2./number_B_molecules)*gofrPrefactorVirial)*logGofrBBx1sqr[i][j];
           }
           if (gofrAB[i][j]>1.e-10) {
-             integrandVirialAB[i][j] = gofrVirialAB[i][j]*logGofrABx1sqr[i][j];
+             integrandVirialAB[i][j] = 
+               (gofrVirialAB[i][j]-gofrAB[i][j]*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*gofrPrefactorVirial)*logGofrABx1sqr[i][j];
           }
       }
     }
     // Integrate virial
-    virial = -prefactorAA*integrate(integrandVirialAA,delta)
-             -prefactorBB*integrate(integrandVirialBB,delta)
-             -prefactorAB*integrate(integrandVirialAB,delta);
+    virialAA = -prefactorAA*integrate(integrandVirialAA,delta);
+    virialBB = -prefactorBB*integrate(integrandVirialBB,delta);
+    virialAB = -prefactorAB*integrate(integrandVirialAB,delta);
     // Virial of volume
     // Construct virial integrand
     Matrix<double> integrandVirialVolumeAA(nhist_[0],nhist_[1]);
@@ -1114,16 +1189,45 @@ void PairOrientationalEntropyConformer::calculate()
        }
     }
     // Integrate virial
-    virial += -prefactorAA*integrate(integrandVirialVolumeAA,delta)*Tensor::identity()
-              -prefactorBB*integrate(integrandVirialVolumeBB,delta)*Tensor::identity()
-              -prefactorAB*integrate(integrandVirialVolumeAB,delta)*Tensor::identity();
-    */
+    virialAA += -prefactorAA*integrate(integrandVirialVolumeAA,delta)*Tensor::identity();
+    virialBB += -prefactorBB*integrate(integrandVirialVolumeBB,delta)*Tensor::identity();
+    virialAB += -prefactorAB*integrate(integrandVirialVolumeAB,delta)*Tensor::identity();
+    // Virial of one body
+    if (one_body) {
+      virialOneBody = (6./2. - std::log(densityA*deBroglie3))*gofrPrefactorVirial/number_molecules;
+      virialOneBody += (6./2. + std::log(densityB*deBroglie3))*gofrPrefactorVirial/number_molecules;
+      // Virial of volume
+      virialOneBody -= (number_A_molecules/number_molecules)*Tensor::identity();
+      virialOneBody -= (number_B_molecules/number_molecules)*Tensor::identity();
+    }
   }
   //std::cout << "Derivatives integration: " << float( clock () - begin_time ) << "\n";
   // Assign output quantities
-  for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
-  setValue           (pairEntropy);
-  setBoxDerivatives  (virial);
+  if (do_pairs) {
+    Value* pairAA=getPntrToComponent("pairAA");
+    Value* pairAB=getPntrToComponent("pairAB");
+    Value* pairBB=getPntrToComponent("pairBB");
+    Value* full=getPntrToComponent("full");
+    pairAA->set(pairAAvalue);
+    pairAB->set(pairABvalue);
+    pairBB->set(pairBBvalue);
+    full->set(pairAAvalue+pairABvalue+pairBBvalue+oneBody);
+    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAA,j,derivAA[j]);
+    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAB,j,derivAB[j]);
+    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairBB,j,derivBB[j]);
+    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (full,j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);
+    setBoxDerivatives  (pairAA,virialAA);
+    setBoxDerivatives  (pairBB,virialBB);
+    setBoxDerivatives  (pairAB,virialAB);
+    setBoxDerivatives  (full,virialAA+virialBB+virialAB+virialOneBody);
+  } else {
+    setValue(pairAAvalue+pairABvalue+pairBBvalue+oneBody);
+    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);
+    setBoxDerivatives  (virialAA+virialBB+virialAB+virialOneBody);
+  } 
+
+  //for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
+  //setValue           (pairEntropy);
 }
 
 double PairOrientationalEntropyConformer::kernel(vector<double> distance, double invNormKernel, vector<double>&der)const{
