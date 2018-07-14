@@ -84,6 +84,8 @@ class PairOrientationalEntropyConformer : public Colvar {
   // One body
   bool one_body;
   double deBroglie3;
+  // Periodic images
+  int periodic_images;
 public:
   explicit PairOrientationalEntropyConformer(const ActionOptions&);
   ~PairOrientationalEntropyConformer();
@@ -123,6 +125,7 @@ void PairOrientationalEntropyConformer::registerKeywords( Keywords& keys ){
   keys.add("atoms","VECTOR3START","Start point of third vector");
   keys.add("atoms","VECTOR3END"  ,"End point of third vector");
   keys.add("optional","TEMPERATURE","Temperature in Kelvin. It is compulsory when keyword ONE_BODY is used");
+  keys.add("optional","PERIODIC_IMAGES","Number of periodic images to consider in the calculation of g(r). This could be done automatically in the future.");
   keys.add("optional","MASS","Mass in g/mol. It is compulsory when keyword ONE_BODY is used");
   keys.addFlag("ONE_BODY",false,"Add the one body term (S = 5/2 - ln(dens*deBroglie^3) ) to the entropy");
   keys.addOutputComponent("pairAA","INDIVIDUAL_PAIRS","Pair AA contribution to the multicomponent pair entropy");
@@ -284,6 +287,10 @@ firsttime(true)
      log.printf("The thermal deBroglie wavelength is %f nm. Be sure to use nm as units of distance. \n", deBroglie);
   }
 
+  periodic_images=0;
+  parse("PERIODIC_IMAGES",periodic_images);
+  if (periodic_images>0) log.printf("%d periodic images are considered \n", periodic_images);
+
   checkRead();
 
   // Neighbor lists
@@ -385,10 +392,6 @@ void PairOrientationalEntropyConformer::calculate()
   double number_A_molecules = 0.;
   std::vector<Vector> vectors1(number_molecules), vectors2(number_molecules), vectors3(number_molecules);
   for(int i=0;i<number_molecules;i+=1) {
-    /*
-    log.printf("atom1 x y z %f %f %f \n", getPosition(i)[0]*10., getPosition(i)[1]*10., getPosition(i)[2]*10.);
-    log.printf("atom2 x y z %f %f %f \n", getPosition(i+1*number_molecules)[0]*10,getPosition(i+1*number_molecules)[1]*10,getPosition(i+1*number_molecules)[2]*10);
-    */
     Vector vector1=pbcDistance(getPosition(i+3*number_molecules),getPosition(i+4*number_molecules));
     Vector vector2=pbcDistance(getPosition(i+5*number_molecules),getPosition(i+6*number_molecules));
     Vector vector3=pbcDistance(getPosition(i+7*number_molecules),getPosition(i+8*number_molecules));
@@ -404,11 +407,8 @@ void PairOrientationalEntropyConformer::calculate()
     vector1 *= inv_norm_v1;
     vector2 *= inv_norm_v2;
     vector3 *= inv_norm_v3;
-    //double inv_v3=1./norm_v3;
     Vector vector4=crossProduct(vector1,vector2); 
-    //double norm_v4 = std::sqrt(vector4[0]*vector4[0]+vector4[1]*vector4[1]+vector4[2]*vector4[2]);
     spin[i] = (dotProduct(vector3,vector4)+1)/2.;
-    //log.printf("%f \n", spin[i]);
     number_A_molecules += spin[i];
     Vector deriv_vector1_x = inv_norm_v1*Vector(1,0,0) - vector1*vector1[0]*inv_norm_v1;
     Vector deriv_vector1_y = inv_norm_v1*Vector(0,1,0) - vector1*vector1[1]*inv_norm_v1;
@@ -451,8 +451,6 @@ void PairOrientationalEntropyConformer::calculate()
     outputXYZ(spin);
   }
 
-  //clock_t begin_time = clock();
-  // Define intermediate quantities
   Matrix<double> gofrAA(nhist_[0],nhist_[1]);
   Matrix<double> gofrBB(nhist_[0],nhist_[1]);
   Matrix<double> gofrAB(nhist_[0],nhist_[1]);
@@ -500,6 +498,10 @@ void PairOrientationalEntropyConformer::calculate()
   double invNormConstantBaseAA = 1./normConstantBaseAA;
   double invNormConstantBaseBB = 1./normConstantBaseBB;
   double invNormConstantBaseAB = 1./normConstantBaseAB;
+  // Box vectors
+  Vector BoxVector1(getBox()[0][0],getBox()[0][1],getBox()[0][1]);
+  Vector BoxVector2(getBox()[1][0],getBox()[1][1],getBox()[1][1]);
+  Vector BoxVector3(getBox()[2][0],getBox()[2][1],getBox()[2][1]);
   // Setup parallelization
   unsigned stride=comm.Get_size();
   unsigned rank=comm.Get_rank();
@@ -528,127 +530,143 @@ void PairOrientationalEntropyConformer::calculate()
        // Loop over neighbors
        for(unsigned int j=0;j<neighbors.size();j+=1) {  
           unsigned neighbor=neighbors[j];
-          if(getAbsoluteIndex(index)==getAbsoluteIndex(neighbor)) continue;
-          Vector distance=pbcDistance(position_index,getPosition(neighbor));
-          double d2;
-          if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-             double distanceModulo=std::sqrt(d2);
-             Vector distance_versor = distance / distanceModulo;
-             unsigned bin=std::floor(distanceModulo/deltar);
-             unsigned atom1_mol2=neighbor+center_lista.size();
-             unsigned atom2_mol2=neighbor+center_lista.size()+start_lista.size();
-             Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-             double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
-             double inv_v2=1./norm_v2;
-             double inv_v1_inv_v2=inv_v1*inv_v2;
-             double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-             Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
-             if (doUpDownSymmetry && cosAngle<0) {
-                der_mol1 *= -1.;
-             }
-             unsigned binAngle;
-             if (doUpDownSymmetry && cosAngle<0) {
-                binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
-             } else {
-                binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
-             }
-             int minBin, maxBin; // These cannot be unsigned
-             // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-             minBin=bin - deltaBin;
-             if (minBin < 0) minBin=0;
-             if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
-             maxBin=bin +  deltaBin;
-             if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
-             int minBinAngle, maxBinAngle; // These cannot be unsigned
-             // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
-             minBinAngle=binAngle - deltaBinAngle;
-             maxBinAngle=binAngle +  deltaBinAngle;
-             for(int k=minBin;k<maxBin+1;k+=1) {
-               double invNormKernelAA=invNormConstantBaseAA/x1sqr[k];
-               double invNormKernelBB=invNormConstantBaseBB/x1sqr[k];
-               double invNormKernelAB=invNormConstantBaseAB/x1sqr[k];
-               vector<double> pos(2);
-               pos[0]=x1[k]-distanceModulo;
-               for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-                  double theta=startCosAngle+deltaCosAngle*l;
-                  if (doUpDownSymmetry && cosAngle<0) {
-                     pos[1]=theta+cosAngle;
-                  } else {
-                     pos[1]=theta-cosAngle;
-                  }
-                  // Include periodic effects
-                  int h;
-                  if (l<0) {
-                     h=-l;
-                  } else if (l>(nhist_[1]-1)) {
-                     h=2*nhist_[1]-l-2;
-                  } else {
-                     h=l;
-                  }
-                  vector<double> dfuncAA(2);
-                  vector<double> dfuncBB(2);
-                  vector<double> dfuncAB(2);
-                  double kernelAA, kernelBB, kernelAB;
-                  if (l==(nhist_[1]-1) || l==0) {
-                     kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
-                     kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
-                     kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
-                  } else {
-                     kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
-                     kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
-                     kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
-                  }
-                  // These are divided by 2 because they will be summed twice
-                  gofrAA[k][h] += kernelAA*spin[index]*spin[neighbor]/2.;
-                  gofrBB[k][h] += kernelBB*(1-spin[index])*(1-spin[neighbor])/2.;
-                  gofrAB[k][h] += kernelAB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor])/2.;
-
-                  Vector value1AA = dfuncAA[0]*distance_versor;
-                  Vector value1BB = dfuncBB[0]*distance_versor;
-                  Vector value1AB = dfuncAB[0]*distance_versor;
-                  Vector value2_mol1AA = dfuncAA[1]*der_mol1;
-                  Vector value2_mol1BB = dfuncBB[1]*der_mol1;
-                  Vector value2_mol1AB = dfuncAB[1]*der_mol1;
-                  gofrPrimeCenterAA[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[index]*spin[neighbor];
-                  gofrPrimeCenterBB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeCenterAB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
-                  gofrPrimeStartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[index]*spin[neighbor];
-                  gofrPrimeStartBB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeStartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
-                  gofrPrimeEndAA[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[index]*spin[neighbor];
-                  gofrPrimeEndBB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
-                  gofrPrimeEndAB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
-
-                  gofrPrimeVector1StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index];
-                  gofrPrimeVector2StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules];
-                  gofrPrimeVector3StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index+4*number_molecules];
-                  gofrPrimeVector1StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index];
-                  gofrPrimeVector2StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index+2*number_molecules];
-                  gofrPrimeVector3StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index+4*number_molecules];
-                  gofrPrimeVector1StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index];
-                  gofrPrimeVector2StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules];
-                  gofrPrimeVector3StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules];
-
-                  Tensor vv1AA(value1AA, distance);
-                  Tensor vv1BB(value1BB, distance);
-                  Tensor vv1AB(value1AB, distance);
-                  Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
-                  Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
-                  Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
-                  Tensor vv3_vector1_AA(kernelAA*spin[neighbor]*deriv_spin[index],vectors1[index]);
-                  Tensor vv3_vector2_AA(kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules],vectors2[index]);
-                  Tensor vv3_vector3_AA(kernelAA*spin[neighbor]*deriv_spin[index+4*number_molecules],vectors3[index]);
-                  Tensor vv3_vector1_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index],vectors1[index]);
-                  Tensor vv3_vector2_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index+2*number_molecules],vectors2[index]);
-                  Tensor vv3_vector3_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index+4*number_molecules],vectors3[index]);
-                  Tensor vv3_vector1_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index],vectors1[index]);
-                  Tensor vv3_vector2_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules],vectors2[index]);
-                  Tensor vv3_vector3_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules],vectors3[index]);
-
-                  gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[index]*spin[neighbor] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
-                  gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[index])*(1-spin[neighbor]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
-                  gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
-               }
+          Vector distanceMinimumImage;
+          if(pbc){
+           distanceMinimumImage=pbcDistance(position_index,getPosition(neighbor));
+          } else {
+           distanceMinimumImage=delta(position_index,getPosition(neighbor));
+          }
+          for (int l=-periodic_images; l<(periodic_images+1); l++) {
+            for (int m=-periodic_images; m<(periodic_images+1); m++) {
+              for (int n=-periodic_images; n<(periodic_images+1); n++) {
+                // if same atom and same image
+                if(getAbsoluteIndex(index)==getAbsoluteIndex(neighbor) && l==0 && m==0 && n==0) continue;
+                Vector distance=distanceMinimumImage;
+                distance += l*BoxVector1;
+                distance += m*BoxVector2;
+                distance += n*BoxVector3;
+                double d2;
+                if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+                   double distanceModulo=std::sqrt(d2);
+                   Vector distance_versor = distance / distanceModulo;
+                   unsigned bin=std::floor(distanceModulo/deltar);
+                   unsigned atom1_mol2=neighbor+center_lista.size();
+                   unsigned atom2_mol2=neighbor+center_lista.size()+start_lista.size();
+                   Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+                   double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
+                   double inv_v2=1./norm_v2;
+                   double inv_v1_inv_v2=inv_v1*inv_v2;
+                   double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
+                   Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+                   if (doUpDownSymmetry && cosAngle<0) {
+                      der_mol1 *= -1.;
+                   }
+                   unsigned binAngle;
+                   if (doUpDownSymmetry && cosAngle<0) {
+                      binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
+                   } else {
+                      binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
+                   }
+                   int minBin, maxBin; // These cannot be unsigned
+                   // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+                   minBin=bin - deltaBin;
+                   if (minBin < 0) minBin=0;
+                   if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
+                   maxBin=bin +  deltaBin;
+                   if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
+                   int minBinAngle, maxBinAngle; // These cannot be unsigned
+                   // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
+                   minBinAngle=binAngle - deltaBinAngle;
+                   maxBinAngle=binAngle +  deltaBinAngle;
+                   for(int k=minBin;k<maxBin+1;k+=1) {
+                     double invNormKernelAA=invNormConstantBaseAA/x1sqr[k];
+                     double invNormKernelBB=invNormConstantBaseBB/x1sqr[k];
+                     double invNormKernelAB=invNormConstantBaseAB/x1sqr[k];
+                     vector<double> pos(2);
+                     pos[0]=x1[k]-distanceModulo;
+                     for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
+                        double theta=startCosAngle+deltaCosAngle*l;
+                        if (doUpDownSymmetry && cosAngle<0) {
+                           pos[1]=theta+cosAngle;
+                        } else {
+                           pos[1]=theta-cosAngle;
+                        }
+                        // Include periodic effects
+                        int h;
+                        if (l<0) {
+                           h=-l;
+                        } else if (l>(nhist_[1]-1)) {
+                           h=2*nhist_[1]-l-2;
+                        } else {
+                           h=l;
+                        }
+                        vector<double> dfuncAA(2);
+                        vector<double> dfuncBB(2);
+                        vector<double> dfuncAB(2);
+                        double kernelAA, kernelBB, kernelAB;
+                        if (l==(nhist_[1]-1) || l==0) {
+                           kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
+                           kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
+                           kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
+                        } else {
+                           kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
+                           kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
+                           kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
+                        }
+                        // These are divided by 2 because they will be summed twice
+                        gofrAA[k][h] += kernelAA*spin[index]*spin[neighbor]/2.;
+                        gofrBB[k][h] += kernelBB*(1-spin[index])*(1-spin[neighbor])/2.;
+                        gofrAB[k][h] += kernelAB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor])/2.;
+           
+                        Vector value1AA = dfuncAA[0]*distance_versor;
+                        Vector value1BB = dfuncBB[0]*distance_versor;
+                        Vector value1AB = dfuncAB[0]*distance_versor;
+                        Vector value2_mol1AA = dfuncAA[1]*der_mol1;
+                        Vector value2_mol1BB = dfuncBB[1]*der_mol1;
+                        Vector value2_mol1AB = dfuncAB[1]*der_mol1;
+                        gofrPrimeCenterAA[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[index]*spin[neighbor];
+                        gofrPrimeCenterBB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[index])*(1-spin[neighbor]);
+                        gofrPrimeCenterAB[index*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+                        gofrPrimeStartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[index]*spin[neighbor];
+                        gofrPrimeStartBB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
+                        gofrPrimeStartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+                        gofrPrimeEndAA[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[index]*spin[neighbor];
+                        gofrPrimeEndBB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[index])*(1-spin[neighbor]);
+                        gofrPrimeEndAB[index*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]);
+           
+                        gofrPrimeVector1StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index];
+                        gofrPrimeVector2StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules];
+                        gofrPrimeVector3StartAA[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[neighbor]*deriv_spin[index+4*number_molecules];
+                        gofrPrimeVector1StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index];
+                        gofrPrimeVector2StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index+2*number_molecules];
+                        gofrPrimeVector3StartBB[index*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[neighbor])*deriv_spin[index+4*number_molecules];
+                        gofrPrimeVector1StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index];
+                        gofrPrimeVector2StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules];
+                        gofrPrimeVector3StartAB[index*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules];
+           
+                        Tensor vv1AA(value1AA, distance);
+                        Tensor vv1BB(value1BB, distance);
+                        Tensor vv1AB(value1AB, distance);
+                        Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
+                        Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
+                        Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
+                        Tensor vv3_vector1_AA(kernelAA*spin[neighbor]*deriv_spin[index],vectors1[index]);
+                        Tensor vv3_vector2_AA(kernelAA*spin[neighbor]*deriv_spin[index+2*number_molecules],vectors2[index]);
+                        Tensor vv3_vector3_AA(kernelAA*spin[neighbor]*deriv_spin[index+4*number_molecules],vectors3[index]);
+                        Tensor vv3_vector1_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index],vectors1[index]);
+                        Tensor vv3_vector2_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index+2*number_molecules],vectors2[index]);
+                        Tensor vv3_vector3_BB(-kernelBB*(1-spin[neighbor])*deriv_spin[index+4*number_molecules],vectors3[index]);
+                        Tensor vv3_vector1_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index],vectors1[index]);
+                        Tensor vv3_vector2_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+2*number_molecules],vectors2[index]);
+                        Tensor vv3_vector3_AB(kernelAB*(1-2*spin[neighbor])*deriv_spin[index+4*number_molecules],vectors3[index]);
+           
+                        gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[index]*spin[neighbor] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
+                        gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[index])*(1-spin[neighbor]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
+                        gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[index]+spin[neighbor]-2*spin[index]*spin[neighbor]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
+                     }
+		   }
+                 }
+	       }
              }
            }
         }
@@ -663,139 +681,148 @@ void PairOrientationalEntropyConformer::calculate()
       double inv_v1_sqr=inv_v1*inv_v1;
       for(unsigned int j=0;j<center_lista.size();j+=1) {
         double d2;
-        Vector distance;
-        if(getAbsoluteIndex(i)==getAbsoluteIndex(j)) continue;
+        Vector distanceMinimumImage;
         if(pbc){
-         distance=pbcDistance(getPosition(i),getPosition(j));
+         distanceMinimumImage=pbcDistance(getPosition(i),getPosition(j));
         } else {
-         distance=delta(getPosition(i),getPosition(j));
+         distanceMinimumImage=delta(getPosition(i),getPosition(j));
         }
-        if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
-          double distanceModulo=std::sqrt(d2);
-          Vector distance_versor = distance / distanceModulo;
-          unsigned bin=std::floor(distanceModulo/deltar);
-          unsigned atom1_mol2=j+center_lista.size();
-          unsigned atom2_mol2=j+center_lista.size()+start_lista.size();
-          Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
-          double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
-          double inv_v2=1./norm_v2;
-          double inv_v1_inv_v2=inv_v1*inv_v2;
-          double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
-          Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
-          if (doUpDownSymmetry && cosAngle<0) {
-             der_mol1 *= -1.;
-          }
-          unsigned binAngle;
-          if (doUpDownSymmetry && cosAngle<0) {
-             binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
-          } else {
-             binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
-          }
-          int minBin, maxBin; // These cannot be unsigned
-          // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
-          minBin=bin - deltaBin;
-          if (minBin < 0) minBin=0;
-          if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
-          maxBin=bin +  deltaBin;
-          if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
-          int minBinAngle, maxBinAngle; // These cannot be unsigned
-          // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
-          minBinAngle=binAngle - deltaBinAngle;
-          maxBinAngle=binAngle +  deltaBinAngle;
-          for(int k=minBin;k<maxBin+1;k+=1) {
-            double invNormKernelAA=invNormConstantBaseAA/x1sqr[k];
-            double invNormKernelBB=invNormConstantBaseBB/x1sqr[k];
-            double invNormKernelAB=invNormConstantBaseAB/x1sqr[k];
-            vector<double> pos(2);
-            pos[0]=x1[k]-distanceModulo;
-            for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
-              double theta=startCosAngle+deltaCosAngle*l;
-              if (doUpDownSymmetry && cosAngle<0) {
-                 pos[1]=theta+cosAngle;
-              } else {
-                 pos[1]=theta-cosAngle;
+	for (int l=-periodic_images; l<(periodic_images+1); l++) {
+	  for (int m=-periodic_images; m<(periodic_images+1); m++) {
+	    for (int n=-periodic_images; n<(periodic_images+1); n++) {
+	      // if same atom and same image
+              if(getAbsoluteIndex(i)==getAbsoluteIndex(j) && l==0 && m==0 && n==0) continue;
+	      Vector distance=distanceMinimumImage;
+	      distance += l*BoxVector1;
+	      distance += m*BoxVector2;
+	      distance += n*BoxVector3;
+              if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
+                double distanceModulo=std::sqrt(d2);
+                Vector distance_versor = distance / distanceModulo;
+                unsigned bin=std::floor(distanceModulo/deltar);
+                unsigned atom1_mol2=j+center_lista.size();
+                unsigned atom2_mol2=j+center_lista.size()+start_lista.size();
+                Vector mol_vector2=pbcDistance(getPosition(atom1_mol2),getPosition(atom2_mol2));
+                double norm_v2 = std::sqrt(mol_vector2[0]*mol_vector2[0]+mol_vector2[1]*mol_vector2[1]+mol_vector2[2]*mol_vector2[2]);
+                double inv_v2=1./norm_v2;
+                double inv_v1_inv_v2=inv_v1*inv_v2;
+                double cosAngle=dotProduct(mol_vector1,mol_vector2)*inv_v1*inv_v2;
+                Vector der_mol1=mol_vector2*inv_v1_inv_v2-cosAngle*mol_vector1*inv_v1_sqr;
+                if (doUpDownSymmetry && cosAngle<0) {
+                   der_mol1 *= -1.;
+                }
+                unsigned binAngle;
+                if (doUpDownSymmetry && cosAngle<0) {
+                   binAngle=std::floor((-cosAngle-startCosAngle)/deltaCosAngle);
+                } else {
+                   binAngle=std::floor((cosAngle-startCosAngle)/deltaCosAngle);
+                }
+                int minBin, maxBin; // These cannot be unsigned
+                // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual distance
+                minBin=bin - deltaBin;
+                if (minBin < 0) minBin=0;
+                if (minBin > (nhist_[0]-1)) minBin=nhist_[0]-1;
+                maxBin=bin +  deltaBin;
+                if (maxBin > (nhist_[0]-1)) maxBin=nhist_[0]-1;
+                int minBinAngle, maxBinAngle; // These cannot be unsigned
+                // Only consider contributions to g(r) of atoms less than n*sigma bins apart from the actual angle
+                minBinAngle=binAngle - deltaBinAngle;
+                maxBinAngle=binAngle +  deltaBinAngle;
+                for(int k=minBin;k<maxBin+1;k+=1) {
+                  double invNormKernelAA=invNormConstantBaseAA/x1sqr[k];
+                  double invNormKernelBB=invNormConstantBaseBB/x1sqr[k];
+                  double invNormKernelAB=invNormConstantBaseAB/x1sqr[k];
+                  vector<double> pos(2);
+                  pos[0]=x1[k]-distanceModulo;
+                  for(int l=minBinAngle;l<maxBinAngle+1;l+=1) {
+                    double theta=startCosAngle+deltaCosAngle*l;
+                    if (doUpDownSymmetry && cosAngle<0) {
+                       pos[1]=theta+cosAngle;
+                    } else {
+                       pos[1]=theta-cosAngle;
+                    }
+                    // Include periodic effects
+                    int h;
+                    if (l<0) {
+                       h=-l;
+                    } else if (l>(nhist_[1]-1)) {
+                       h=2*nhist_[1]-l-2;
+                    } else {
+                       h=l;
+                    }
+                    vector<double> dfuncAA(2);
+                    vector<double> dfuncBB(2);
+                    vector<double> dfuncAB(2);
+                    double kernelAA, kernelBB, kernelAB;
+                    if (l==(nhist_[1]-1) || l==0) {
+                       kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
+                       kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
+                       kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
+                    } else {
+                       kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
+                       kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
+                       kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
+                    }
+         
+                    gofrAA[k][h] += kernelAA*spin[i]*spin[j]/2.;
+                    gofrBB[k][h] += kernelBB*(1-spin[i])*(1-spin[j])/2.;
+                    gofrAB[k][h] += kernelAB*(spin[i]+spin[j]-2*spin[i]*spin[j])/2.;
+         
+                    Vector value1AA = dfuncAA[0]*distance_versor;
+                    Vector value1BB = dfuncBB[0]*distance_versor;
+                    Vector value1AB = dfuncAB[0]*distance_versor;
+                    Vector value2_mol1AA = dfuncAA[1]*der_mol1;
+                    Vector value2_mol1BB = dfuncBB[1]*der_mol1;
+                    Vector value2_mol1AB = dfuncAB[1]*der_mol1;
+                    gofrPrimeCenterAA[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[i]*spin[j];
+                    gofrPrimeCenterBB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[i])*(1-spin[j]);
+                    gofrPrimeCenterAB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+                    gofrPrimeStartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[i]*spin[j];
+                    gofrPrimeStartBB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
+                    gofrPrimeStartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+                    gofrPrimeEndAA[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[i]*spin[j];
+                    gofrPrimeEndBB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
+                    gofrPrimeEndAB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+         
+                    gofrPrimeVector1StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i];
+                    gofrPrimeVector2StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+2*number_molecules];
+                    gofrPrimeVector3StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+4*number_molecules];
+                    gofrPrimeVector1StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i];
+                    gofrPrimeVector2StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules];
+                    gofrPrimeVector3StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules];
+                    gofrPrimeVector1StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i];
+                    gofrPrimeVector2StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules];
+                    gofrPrimeVector3StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules];
+         
+         
+                    Tensor vv1AA(value1AA, distance);
+                    Tensor vv1BB(value1BB, distance);
+                    Tensor vv1AB(value1AB, distance);
+                    Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
+                    Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
+                    Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
+                    Tensor vv3_vector1_AA(kernelAA*spin[j]*deriv_spin[i],vectors1[i]);
+                    Tensor vv3_vector2_AA(kernelAA*spin[j]*deriv_spin[i+2*number_molecules],vectors2[i]);
+                    Tensor vv3_vector3_AA(kernelAA*spin[j]*deriv_spin[i+4*number_molecules],vectors3[i]);
+                    Tensor vv3_vector1_BB(-kernelBB*(1-spin[j])*deriv_spin[i],vectors1[i]);
+                    Tensor vv3_vector2_BB(-kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
+                    Tensor vv3_vector3_BB(-kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
+                    Tensor vv3_vector1_AB(kernelAB*(1-2*spin[j])*deriv_spin[i],vectors1[i]);
+                    Tensor vv3_vector2_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
+                    Tensor vv3_vector3_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
+         
+                    gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[i]*spin[j] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
+                    gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[i])*(1-spin[j]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
+                    gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[i]+spin[j]-2*spin[i]*spin[j]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
+                  }
+                }
               }
-              // Include periodic effects
-              int h;
-              if (l<0) {
-                 h=-l;
-              } else if (l>(nhist_[1]-1)) {
-                 h=2*nhist_[1]-l-2;
-              } else {
-                 h=l;
-              }
-              vector<double> dfuncAA(2);
-              vector<double> dfuncBB(2);
-              vector<double> dfuncAB(2);
-              double kernelAA, kernelBB, kernelAB;
-              if (l==(nhist_[1]-1) || l==0) {
-                 kernelAA = kernel(pos,2.*invNormKernelAA,dfuncAA);
-                 kernelBB = kernel(pos,2.*invNormKernelBB,dfuncBB);
-                 kernelAB = kernel(pos,2.*invNormKernelAB,dfuncAB);
-              } else {
-                 kernelAA = kernel(pos,invNormKernelAA,dfuncAA);
-                 kernelBB = kernel(pos,invNormKernelBB,dfuncBB);
-                 kernelAB = kernel(pos,invNormKernelAB,dfuncAB);
-              }
-
-              gofrAA[k][h] += kernelAA*spin[i]*spin[j]/2.;
-              gofrBB[k][h] += kernelBB*(1-spin[i])*(1-spin[j])/2.;
-              gofrAB[k][h] += kernelAB*(spin[i]+spin[j]-2*spin[i]*spin[j])/2.;
-
-              Vector value1AA = dfuncAA[0]*distance_versor;
-              Vector value1BB = dfuncBB[0]*distance_versor;
-              Vector value1AB = dfuncAB[0]*distance_versor;
-              Vector value2_mol1AA = dfuncAA[1]*der_mol1;
-              Vector value2_mol1BB = dfuncBB[1]*der_mol1;
-              Vector value2_mol1AB = dfuncAB[1]*der_mol1;
-              gofrPrimeCenterAA[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[i]*spin[j];
-              gofrPrimeCenterBB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[i])*(1-spin[j]);
-              gofrPrimeCenterAB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-              gofrPrimeStartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[i]*spin[j];
-              gofrPrimeStartBB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
-              gofrPrimeStartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-              gofrPrimeEndAA[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[i]*spin[j];
-              gofrPrimeEndBB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
-              gofrPrimeEndAB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
-
-              gofrPrimeVector1StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i];
-              gofrPrimeVector2StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+2*number_molecules];
-              gofrPrimeVector3StartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAA*spin[j]*deriv_spin[i+4*number_molecules];
-              gofrPrimeVector1StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i];
-              gofrPrimeVector2StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules];
-              gofrPrimeVector3StartBB[i*nhist1_nhist2_+k*nhist_[1]+h] += -kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules];
-              gofrPrimeVector1StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i];
-              gofrPrimeVector2StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules];
-              gofrPrimeVector3StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules];
-
-
-              Tensor vv1AA(value1AA, distance);
-              Tensor vv1BB(value1BB, distance);
-              Tensor vv1AB(value1AB, distance);
-              Tensor vv2_mol1AA(value2_mol1AA, mol_vector1);
-              Tensor vv2_mol1BB(value2_mol1BB, mol_vector1);
-              Tensor vv2_mol1AB(value2_mol1AB, mol_vector1);
-              Tensor vv3_vector1_AA(kernelAA*spin[j]*deriv_spin[i],vectors1[i]);
-              Tensor vv3_vector2_AA(kernelAA*spin[j]*deriv_spin[i+2*number_molecules],vectors2[i]);
-              Tensor vv3_vector3_AA(kernelAA*spin[j]*deriv_spin[i+4*number_molecules],vectors3[i]);
-              Tensor vv3_vector1_BB(-kernelBB*(1-spin[j])*deriv_spin[i],vectors1[i]);
-              Tensor vv3_vector2_BB(-kernelBB*(1-spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
-              Tensor vv3_vector3_BB(-kernelBB*(1-spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
-              Tensor vv3_vector1_AB(kernelAB*(1-2*spin[j])*deriv_spin[i],vectors1[i]);
-              Tensor vv3_vector2_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules],vectors2[i]);
-              Tensor vv3_vector3_AB(kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules],vectors3[i]);
-
-              gofrVirialAA[k][h] += (vv1AA/2.+vv2_mol1AA)*spin[i]*spin[j] + vv3_vector1_AA + vv3_vector2_AA + vv3_vector3_AA;
-              gofrVirialBB[k][h] += (vv1BB/2.+vv2_mol1BB)*(1-spin[i])*(1-spin[j]) + vv3_vector1_BB + vv3_vector2_BB + vv3_vector3_BB;
-              gofrVirialAB[k][h] += (vv1AB/2.+vv2_mol1AB)*(spin[i]+spin[j]-2*spin[i]*spin[j]) + vv3_vector1_AB + vv3_vector2_AB + vv3_vector3_AB;
-            }
-          }
+	    }
+	  }
         }
       }
     }
   } 
-  //std::cout << "Main loop: " << float( clock () - begin_time ) << "\n";
-  //begin_time = clock();
   if(!serial){
     comm.Sum(gofrAA);
     comm.Sum(gofrBB);
@@ -804,21 +831,8 @@ void PairOrientationalEntropyConformer::calculate()
        comm.Sum(gofrVirialAA);
        comm.Sum(gofrVirialBB);
        comm.Sum(gofrVirialAB);
-       /*
-       comm.Sum(gofrPrimeCenterAA);
-       comm.Sum(gofrPrimeCenterBB);
-       comm.Sum(gofrPrimeCenterAB);
-       comm.Sum(gofrPrimeStartAA);
-       comm.Sum(gofrPrimeStartBB);
-       comm.Sum(gofrPrimeStartAB);
-       comm.Sum(gofrPrimeEndAA);
-       comm.Sum(gofrPrimeEndBB);
-       comm.Sum(gofrPrimeEndAB);
-       */
     }
   }
-  //std::cout << "Communication: " <<  float( clock () - begin_time ) << "\n";
-  //begin_time = clock();
   if (doAverageGofr) {
      if (!doNotCalculateDerivatives()) error("Cannot calculate derivatives or bias using the AVERAGE_GOFR option");
      double factor;
@@ -882,8 +896,6 @@ void PairOrientationalEntropyConformer::calculate()
     oneBody += (8./2. - std::log(densityA*deBroglie3))*number_A_molecules/number_molecules;
     oneBody += (8./2. - std::log(densityB*deBroglie3))*number_B_molecules/number_molecules;
   }
-  //std::cout << "Integrand and integration: " << float( clock () - begin_time ) << "\n";
-  //begin_time = clock();
   // Derivatives
   vector<Vector> derivAA(getNumberOfAtoms());
   vector<Vector> derivBB(getNumberOfAtoms());
@@ -1011,19 +1023,6 @@ void PairOrientationalEntropyConformer::calculate()
          derivBB[vector3_end_atom] = -derivBB[vector3_start_atom];
          derivAB[vector3_end_atom] = -derivAB[vector3_start_atom];
          derivOneBody[vector3_end_atom] = -derivOneBody[vector3_start_atom];
-
-         /*
-         virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+0*number_molecules]*integrate(integrandAA,delta),vectors1[index]);
-         virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+0*number_molecules]*integrate(integrandAA,delta),vectors1[index]);
-         virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+2*number_molecules]*integrate(integrandAA,delta),vectors2[index]);
-         virial += Tensor(-prefactorAA*(2./number_A_molecules)*deriv_spin[index+4*number_molecules]*integrate(integrandAA,delta),vectors3[index]);
-         virial += Tensor(-prefactorBB*(2./number_B_molecules)*deriv_spin[index+0*number_molecules]*integrate(integrandBB,delta),vectors1[index]);
-         virial += Tensor(-prefactorBB*(2./number_B_molecules)*deriv_spin[index+2*number_molecules]*integrate(integrandBB,delta),vectors2[index]);
-         virial += Tensor(-prefactorBB*(2./number_B_molecules)*deriv_spin[index+4*number_molecules]*integrate(integrandBB,delta),vectors3[index]);
-         virial += Tensor(-prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+0*number_molecules]*integrate(integrandAB,delta);
-         virial += Tensor(-prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+2*number_molecules]*integrate(integrandAB,delta);
-         virial += Tensor(-prefactorAB*((number_molecules-2.*number_A_molecules)/(number_A_molecules*number_B_molecules))*deriv_spin[index+4*number_molecules]*integrate(integrandAB,delta);
-         */
        }
     } else {
        for(unsigned int k=rank;k<center_lista.size();k+=stride) {
@@ -1201,8 +1200,6 @@ void PairOrientationalEntropyConformer::calculate()
       virialOneBody -= (number_B_molecules/number_molecules)*Tensor::identity();
     }
   }
-  //std::cout << "Derivatives integration: " << float( clock () - begin_time ) << "\n";
-  // Assign output quantities
   if (do_pairs) {
     Value* pairAA=getPntrToComponent("pairAA");
     Value* pairAB=getPntrToComponent("pairAB");
@@ -1225,15 +1222,11 @@ void PairOrientationalEntropyConformer::calculate()
     for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);
     setBoxDerivatives  (virialAA+virialBB+virialAB+virialOneBody);
   } 
-
-  //for(unsigned i=0;i<deriv.size();++i) setAtomsDerivatives(i,deriv[i]);
-  //setValue           (pairEntropy);
 }
 
 double PairOrientationalEntropyConformer::kernel(vector<double> distance, double invNormKernel, vector<double>&der)const{
   // Gaussian function and derivative
   double result = invNormKernel*std::exp(-distance[0]*distance[0]/twoSigma1Sqr-distance[1]*distance[1]/twoSigma2Sqr) ;
-  //double result = invTwoPiSigma1Sigma2*std::exp(-distance[0]*distance[0]/twoSigma1Sqr-distance[1]*distance[1]/twoSigma2Sqr) ;
   der[0] = -distance[0]*result/sigma1Sqr;
   der[1] = -distance[1]*result/sigma2Sqr;
   return result;
