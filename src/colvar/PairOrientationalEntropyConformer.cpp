@@ -446,6 +446,11 @@ void PairOrientationalEntropyConformer::calculate()
     deriv_spin[i+5*number_molecules][0] =  deriv_spin_vector3_x;
     deriv_spin[i+5*number_molecules][1] =  deriv_spin_vector3_y;
     deriv_spin[i+5*number_molecules][2] =  deriv_spin_vector3_z;
+    /*
+    log.printf("Deriv1 x %f y %f z %f \n", deriv_spin_vector1_x, deriv_spin_vector2_y, deriv_spin_vector3_z);
+    log.printf("Deriv2 x %f y %f z %f \n", deriv_spin_vector1_x, deriv_spin_vector2_y, deriv_spin_vector3_z);
+    log.printf("Deriv3 x %f y %f z %f \n", deriv_spin_vector1_x, deriv_spin_vector2_y, deriv_spin_vector3_z);
+    */
   }
   if (doOutputXYZ) { 
     outputXYZ(spin);
@@ -499,9 +504,9 @@ void PairOrientationalEntropyConformer::calculate()
   double invNormConstantBaseBB = 1./normConstantBaseBB;
   double invNormConstantBaseAB = 1./normConstantBaseAB;
   // Box vectors
-  Vector BoxVector1(getBox()[0][0],getBox()[0][1],getBox()[0][1]);
-  Vector BoxVector2(getBox()[1][0],getBox()[1][1],getBox()[1][1]);
-  Vector BoxVector3(getBox()[2][0],getBox()[2][1],getBox()[2][1]);
+  Vector BoxVector1(getBox()[0][0],getBox()[0][1],getBox()[0][2]);
+  Vector BoxVector2(getBox()[1][0],getBox()[1][1],getBox()[1][2]);
+  Vector BoxVector3(getBox()[2][0],getBox()[2][1],getBox()[2][2]);
   // Setup parallelization
   unsigned stride=comm.Get_size();
   unsigned rank=comm.Get_rank();
@@ -696,6 +701,7 @@ void PairOrientationalEntropyConformer::calculate()
 	      distance += l*BoxVector1;
 	      distance += m*BoxVector2;
 	      distance += n*BoxVector3;
+              //if (distance.modulo()<sqrt(rcut2)) log.printf("index %d , neigh %d , l %d , m %d, n %d, distance %f \n", i, j, l, m, n, distance.modulo() );
               if ( (d2=distance[0]*distance[0])<rcut2 && (d2+=distance[1]*distance[1])<rcut2 && (d2+=distance[2]*distance[2])<rcut2) {
                 double distanceModulo=std::sqrt(d2);
                 Vector distance_versor = distance / distanceModulo;
@@ -774,12 +780,16 @@ void PairOrientationalEntropyConformer::calculate()
                     Vector value2_mol1AA = dfuncAA[1]*der_mol1;
                     Vector value2_mol1BB = dfuncBB[1]*der_mol1;
                     Vector value2_mol1AB = dfuncAB[1]*der_mol1;
+                    //log.printf("dfuncAA %f \n", dfuncAA[1]);
                     gofrPrimeCenterAA[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AA*spin[i]*spin[j];
                     gofrPrimeCenterBB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1BB*(1-spin[i])*(1-spin[j]);
                     gofrPrimeCenterAB[i*nhist1_nhist2_+k*nhist_[1]+h] += value1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
                     gofrPrimeStartAA[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AA*spin[i]*spin[j];
                     gofrPrimeStartBB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
                     gofrPrimeStartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
+                    //log.printf("derivStart value2_mol1AA x %f , y %f , z %f \n", value2_mol1AA[0], value2_mol1AA[1], value2_mol1AA[2]);
+                    //log.printf("derivStart value2_mol1BB x %f , y %f , z %f \n", value2_mol1BB[0], value2_mol1BB[1], value2_mol1BB[2]);
+                    //log.printf("derivStart value2_mol1AB x %f , y %f , z %f \n", value2_mol1AB[0], value2_mol1AB[1], value2_mol1AB[2]);
                     gofrPrimeEndAA[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AA*spin[i]*spin[j];
                     gofrPrimeEndBB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1BB*(1-spin[i])*(1-spin[j]);
                     gofrPrimeEndAB[i*nhist1_nhist2_+k*nhist_[1]+h] -=  value2_mol1AB*(spin[i]+spin[j]-2*spin[i]*spin[j]);
@@ -793,7 +803,6 @@ void PairOrientationalEntropyConformer::calculate()
                     gofrPrimeVector1StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i];
                     gofrPrimeVector2StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+2*number_molecules];
                     gofrPrimeVector3StartAB[i*nhist1_nhist2_+k*nhist_[1]+h] +=  kernelAB*(1-2*spin[j])*deriv_spin[i+4*number_molecules];
-         
          
                     Tensor vv1AA(value1AA, distance);
                     Tensor vv1BB(value1BB, distance);
@@ -1209,14 +1218,17 @@ void PairOrientationalEntropyConformer::calculate()
     pairAB->set(pairABvalue);
     pairBB->set(pairBBvalue);
     full->set(pairAAvalue+pairABvalue+pairBBvalue+oneBody);
-    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAA,j,derivAA[j]);
-    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAB,j,derivAB[j]);
-    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairBB,j,derivBB[j]);
-    for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (full,j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);
-    setBoxDerivatives  (pairAA,virialAA);
-    setBoxDerivatives  (pairBB,virialBB);
-    setBoxDerivatives  (pairAB,virialAB);
-    setBoxDerivatives  (full,virialAA+virialBB+virialAB+virialOneBody);
+    if (!doNotCalculateDerivatives() ) {
+      for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAA,j,derivAA[j]);
+      for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairAB,j,derivAB[j]);
+      for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (pairBB,j,derivBB[j]);
+      for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (full,j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);
+      //for(unsigned j=0;j<getNumberOfAtoms();++j) log.printf("derivAA x y z %f %f %f \n",derivAA[j][0],derivAA[j][1],derivAA[j][2]);
+      setBoxDerivatives  (pairAA,virialAA);
+      setBoxDerivatives  (pairBB,virialBB);
+      setBoxDerivatives  (pairAB,virialAB);
+      setBoxDerivatives  (full,virialAA+virialBB+virialAB+virialOneBody);
+    }
   } else {
     setValue(pairAAvalue+pairABvalue+pairBBvalue+oneBody);
     for(unsigned j=0;j<getNumberOfAtoms();++j) setAtomsDerivatives (j,derivAA[j]+derivAB[j]+derivBB[j]+derivOneBody[j]);

@@ -95,6 +95,7 @@ class PairEntropy : public Colvar {
   mutable PLMD::OFile gofrOfile, integrandOfile;
   // Reference g(r)
   bool doReferenceGofr;
+  bool noPrefactor;
   std::vector<double> referenceGofr;
   // Average g(r)
   bool doAverageGofr;
@@ -120,6 +121,7 @@ void PairEntropy::registerKeywords( Keywords& keys ){
   keys.addFlag("OUTPUT_INTEGRAND",false,"Output integrand");
   keys.add("optional","OUTPUT_STRIDE","The frequency with which the output is written to files");
   keys.addFlag("AVERAGE_GOFR",false,"Average g(r) over time");
+  keys.addFlag("NO_PREFACTOR",false,"Do not include the prefactor -4*pi*density");
   keys.add("optional","NL_CUTOFF","The cutoff for the neighbor list");
   keys.add("optional","NL_STRIDE","The frequency with which we are updating the atoms in the neighbour list. If non specified or negative, it checks every step and rebuilds as needed.");
   keys.add("optional","DENSITY","Density to normalize the g(r). If not specified, N/V is used");
@@ -214,6 +216,9 @@ firsttime(true)
        ifile.scanField("r",tmp_r).scanField("gofr",referenceGofr[i]).scanField();
     }
   }
+
+  noPrefactor=false;
+  parseFlag("NO_PREFACTOR",noPrefactor);
 
   doAverageGofr=false;
   parseFlag("AVERAGE_GOFR",doAverageGofr);
@@ -451,6 +456,8 @@ void PairEntropy::calculate()
      }
      iteration++;
   }
+  // Average g(r)
+  if (noPrefactor and !doNotCalculateDerivatives()) error("Cannot use the NO_PREFACTOR keyword when biasing");
   // Output of gofr
   if (doOutputGofr && (getStep()%outputStride==0)) outputGofr(gofr);
   // Find where g(r) is different from zero
@@ -488,7 +495,9 @@ void PairEntropy::calculate()
   // Output of integrands
   if (doOutputIntegrand && (getStep()%outputStride==0)) outputIntegrand(integrand);
   // Integrate to obtain pair entropy;
-  double pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
+  double pairEntropy;
+  if (!noPrefactor) pairEntropy = -TwoPiDensity*integrate(integrand,deltar);
+  else pairEntropy = integrate(integrand,deltar);
   // Construct integrand and integrate derivatives
   vector<Vector> deriv(getNumberOfAtoms());
   Tensor virial;
