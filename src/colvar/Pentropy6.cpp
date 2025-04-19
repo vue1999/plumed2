@@ -20,7 +20,7 @@
    along with plumed.  If not, see <http://www.gnu.org/licenses/>.
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "Colvar.h"
-#include "ActionRegister.h"
+#include "core/ActionRegister.h"
 #include "tools/NeighborList.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
@@ -108,11 +108,11 @@ firsttime(true)
   
   addValueWithDerivatives(); setNotPeriodic();
   if(gb_lista.size()>0){
-    if(doneigh)  nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc(),nl_cut,nl_st);
-    else         nl= new NeighborList(ga_lista,gb_lista,dopair,pbc,getPbc());
+    if(doneigh)  nl= new NeighborList(ga_lista, gb_lista, serial, dopair, pbc, getPbc(), comm, nl_cut, nl_st);
+    else         nl= new NeighborList(ga_lista, gb_lista, serial, dopair, pbc, getPbc(), comm);
   } else {
-    if(doneigh)  nl= new NeighborList(ga_lista,pbc,getPbc(),nl_cut,nl_st);
-    else         nl= new NeighborList(ga_lista,pbc,getPbc());
+    if(doneigh)  nl= new NeighborList(ga_lista, serial, pbc, getPbc(), comm, nl_cut, nl_st);
+    else         nl= new NeighborList(ga_lista, serial, pbc, getPbc(), comm);
   }
   
   requestAtoms(nl->getFullAtomList());

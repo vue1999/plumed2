@@ -20,7 +20,7 @@
    along with plumed.  If not, see <http://www.gnu.org/licenses/>.
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "Colvar.h"
-#include "ActionRegister.h"
+#include "core/ActionRegister.h"
 #include "tools/NeighborList.h"
 #include "tools/Communicator.h"
 #include "tools/Tools.h"
@@ -180,11 +180,11 @@ firsttime(true)
 
   //addValueWithDerivatives(); setNotPeriodic();
   if (origin_lista.size()>0) {
-     if(doneigh)  nl.reset( new NeighborList(origin_lista,center_lista,dopair,pbc,getPbc(),nl_cut,nl_st) );
-     else         nl.reset( new NeighborList(origin_lista,center_lista,dopair,pbc,getPbc()) );
+     if(doneigh)  nl.reset( new NeighborList(origin_lista, center_lista, serial, dopair, pbc, getPbc(), comm, nl_cut, nl_st) );
+     else         nl.reset( new NeighborList(origin_lista, center_lista, serial, dopair, pbc, getPbc(), comm) );
   } else {
-     if(doneigh)  nl.reset( new NeighborList(center_lista,pbc,getPbc(),nl_cut,nl_st) );
-     else         nl.reset( new NeighborList(center_lista,pbc,getPbc()) );
+     if(doneigh)  nl.reset( new NeighborList(center_lista, serial, pbc, getPbc(), comm, nl_cut, nl_st) );
+     else         nl.reset( new NeighborList(center_lista, serial, pbc, getPbc(), comm) );
   }
 
   if (origin_lista.size()>0) {

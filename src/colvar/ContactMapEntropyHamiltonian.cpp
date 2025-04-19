@@ -21,11 +21,12 @@
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "Colvar.h"
 #include "tools/NeighborList.h"
-#include "ActionRegister.h"
+#include "core/ActionRegister.h"
 #include "tools/SwitchingFunction.h"
 #include "tools/Matrix.h"
 #include "tools/IFile.h"
 #include "tools/OFile.h"
+#include "tools/Communicator.h"
 
 #include <string>
 #include <cmath>

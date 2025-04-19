@@ -335,7 +335,10 @@ double PairEntropiesMulticomp::compute( const unsigned& tindex, AtomValuePack& m
      if (!doNotCalculateDerivatives()) {
        gofrVirial[i] /= normConstant;
        for(unsigned j=0;j<myatoms.getNumberOfAtoms();++j){
-         gofrPrime[i][j] /= normConstant;
+         gofrPrime[i][0] += value;
+         gofrPrime[i][i] -= value;
+         Tensor vv(value, distance);
+         gofrVirial[i] += vv;
        }
      }
      */
